@@ -112,7 +112,7 @@ mod tests {
                 query::{Query, QueryParameters},
                 DeserializableRequest, SerializableRequest,
             },
-            response::result::ColumnType,
+            response::result::{ColumnType, NativeType},
             types::{self, SerialConsistency},
         },
         types::serialize::row::SerializedValues,
@@ -131,7 +131,8 @@ mod tests {
             paging_state: Some(vec![2, 1, 3, 7].into()),
             values: {
                 let mut vals = SerializedValues::new();
-                vals.add_value(&2137, &ColumnType::Int).unwrap();
+                vals.add_value(&2137, &ColumnType::Native(NativeType::Int))
+                    .unwrap();
                 Cow::Owned(vals)
             },
         };
@@ -158,8 +159,10 @@ mod tests {
             paging_state: None,
             values: {
                 let mut vals = SerializedValues::new();
-                vals.add_value(&42, &ColumnType::Int).unwrap();
-                vals.add_value(&2137, &ColumnType::Int).unwrap();
+                vals.add_value(&42, &ColumnType::Native(NativeType::Int))
+                    .unwrap();
+                vals.add_value(&2137, &ColumnType::Native(NativeType::Int))
+                    .unwrap();
                 Cow::Owned(vals)
             },
         };

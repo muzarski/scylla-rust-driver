@@ -1,3 +1,4 @@
+use crate::frame::response::result::{CollectionType, NativeType, UserDefinedType};
 use crate::frame::value::CqlTimeuuid;
 use crate::frame::{response::result::CqlValue, types::RawValue, value::LegacyBatchValuesIterator};
 use crate::types::serialize::batch::{BatchValues, BatchValuesIterator, LegacyBatchValuesAdapter};
@@ -18,6 +19,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::{BuildHasherDefault, Hash, Hasher};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
+use std::sync::Arc;
 use std::{borrow::Cow, convert::TryInto};
 use uuid::Uuid;
 
@@ -46,23 +48,32 @@ fn serialized_only_new<T: SerializeCql>(val: T, typ: ColumnType) -> Vec<u8> {
 
 #[test]
 fn boolean_serialization() {
-    assert_eq!(serialized(true, ColumnType::Boolean), vec![0, 0, 0, 1, 1]);
-    assert_eq!(serialized(false, ColumnType::Boolean), vec![0, 0, 0, 1, 0]);
+    assert_eq!(
+        serialized(true, ColumnType::Native(NativeType::Boolean)),
+        vec![0, 0, 0, 1, 1]
+    );
+    assert_eq!(
+        serialized(false, ColumnType::Native(NativeType::Boolean)),
+        vec![0, 0, 0, 1, 0]
+    );
 }
 
 #[test]
 fn fixed_integral_serialization() {
-    assert_eq!(serialized(8_i8, ColumnType::TinyInt), vec![0, 0, 0, 1, 8]);
     assert_eq!(
-        serialized(16_i16, ColumnType::SmallInt),
+        serialized(8_i8, ColumnType::Native(NativeType::TinyInt)),
+        vec![0, 0, 0, 1, 8]
+    );
+    assert_eq!(
+        serialized(16_i16, ColumnType::Native(NativeType::SmallInt)),
         vec![0, 0, 0, 2, 0, 16]
     );
     assert_eq!(
-        serialized(32_i32, ColumnType::Int),
+        serialized(32_i32, ColumnType::Native(NativeType::Int)),
         vec![0, 0, 0, 4, 0, 0, 0, 32]
     );
     assert_eq!(
-        serialized(64_i64, ColumnType::BigInt),
+        serialized(64_i64, ColumnType::Native(NativeType::BigInt)),
         vec![0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 64]
     );
 }
@@ -70,7 +81,10 @@ fn fixed_integral_serialization() {
 #[test]
 fn counter_serialization() {
     assert_eq!(
-        serialized(0x0123456789abcdef_i64, ColumnType::BigInt),
+        serialized(
+            0x0123456789abcdef_i64,
+            ColumnType::Native(NativeType::BigInt)
+        ),
         vec![0, 0, 0, 8, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef]
     );
 }
@@ -96,7 +110,10 @@ fn bigint_serialization() {
             .chain(b)
             .cloned()
             .collect::<Vec<_>>();
-        assert_eq!(serialized(x, ColumnType::Varint), b_with_len);
+        assert_eq!(
+            serialized(x, ColumnType::Native(NativeType::Varint)),
+            b_with_len
+        );
     }
 }
 
@@ -125,7 +142,7 @@ fn bigdecimal_serialization() {
                 .collect::<Vec<_>>();
             let digits = BigInt::from(*digits);
             let x = BigDecimal::new(digits, exponent as i64);
-            assert_eq!(serialized(x, ColumnType::Decimal), repr);
+            assert_eq!(serialized(x, ColumnType::Native(NativeType::Decimal)), repr);
         }
     }
 }
@@ -133,14 +150,14 @@ fn bigdecimal_serialization() {
 #[test]
 fn floating_point_serialization() {
     assert_eq!(
-        serialized(123.456f32, ColumnType::Float),
+        serialized(123.456f32, ColumnType::Native(NativeType::Float)),
         [0, 0, 0, 4]
             .into_iter()
             .chain((123.456f32).to_be_bytes())
             .collect::<Vec<_>>()
     );
     assert_eq!(
-        serialized(123.456f64, ColumnType::Double),
+        serialized(123.456f64, ColumnType::Native(NativeType::Double)),
         [0, 0, 0, 8]
             .into_iter()
             .chain((123.456f64).to_be_bytes())
@@ -151,11 +168,11 @@ fn floating_point_serialization() {
 #[test]
 fn text_serialization() {
     assert_eq!(
-        serialized("abc", ColumnType::Text),
+        serialized("abc", ColumnType::Native(NativeType::Text)),
         vec![0, 0, 0, 3, 97, 98, 99]
     );
     assert_eq!(
-        serialized("abc".to_string(), ColumnType::Ascii),
+        serialized("abc".to_string(), ColumnType::Native(NativeType::Ascii)),
         vec![0, 0, 0, 3, 97, 98, 99]
     );
 }
@@ -164,7 +181,7 @@ fn text_serialization() {
 fn u8_array_serialization() {
     let val = [1u8; 4];
     assert_eq!(
-        serialized(val, ColumnType::Blob),
+        serialized(val, ColumnType::Native(NativeType::Blob)),
         vec![0, 0, 0, 4, 1, 1, 1, 1]
     );
 }
@@ -173,7 +190,7 @@ fn u8_array_serialization() {
 fn u8_slice_serialization() {
     let val = vec![1u8, 1, 1, 1];
     assert_eq!(
-        serialized(val.as_slice(), ColumnType::Blob),
+        serialized(val.as_slice(), ColumnType::Native(NativeType::Blob)),
         vec![0, 0, 0, 4, 1, 1, 1, 1]
     );
 }
@@ -181,11 +198,11 @@ fn u8_slice_serialization() {
 #[test]
 fn cql_date_serialization() {
     assert_eq!(
-        serialized(CqlDate(0), ColumnType::Date),
+        serialized(CqlDate(0), ColumnType::Native(NativeType::Date)),
         vec![0, 0, 0, 4, 0, 0, 0, 0]
     );
     assert_eq!(
-        serialized(CqlDate(u32::MAX), ColumnType::Date),
+        serialized(CqlDate(u32::MAX), ColumnType::Native(NativeType::Date)),
         vec![0, 0, 0, 4, 255, 255, 255, 255]
     );
 }
@@ -194,7 +211,7 @@ fn cql_date_serialization() {
 fn vec_u8_slice_serialization() {
     let val = vec![1u8, 1, 1, 1];
     assert_eq!(
-        serialized(val, ColumnType::Blob),
+        serialized(val, ColumnType::Native(NativeType::Blob)),
         vec![0, 0, 0, 4, 1, 1, 1, 1]
     );
 }
@@ -203,13 +220,13 @@ fn vec_u8_slice_serialization() {
 fn ipaddr_serialization() {
     let ipv4 = IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4));
     assert_eq!(
-        serialized(ipv4, ColumnType::Inet),
+        serialized(ipv4, ColumnType::Native(NativeType::Inet)),
         vec![0, 0, 0, 4, 1, 2, 3, 4]
     );
 
     let ipv6 = IpAddr::V6(Ipv6Addr::new(1, 2, 3, 4, 5, 6, 7, 8));
     assert_eq!(
-        serialized(ipv6, ColumnType::Inet),
+        serialized(ipv6, ColumnType::Native(NativeType::Inet)),
         vec![
             0, 0, 0, 16, // serialized size
             0, 1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0, 7, 0, 8, // contents
@@ -224,7 +241,7 @@ fn naive_date_serialization() {
     // 1970-01-31 is 2^31
     let unix_epoch: NaiveDate = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
     assert_eq!(
-        serialized(unix_epoch, ColumnType::Date),
+        serialized(unix_epoch, ColumnType::Native(NativeType::Date)),
         vec![0, 0, 0, 4, 128, 0, 0, 0]
     );
     assert_eq!(2_u32.pow(31).to_be_bytes(), [128, 0, 0, 0]);
@@ -232,7 +249,7 @@ fn naive_date_serialization() {
     // 1969-12-02 is 2^31 - 30
     let before_epoch: NaiveDate = NaiveDate::from_ymd_opt(1969, 12, 2).unwrap();
     assert_eq!(
-        serialized(before_epoch, ColumnType::Date),
+        serialized(before_epoch, ColumnType::Native(NativeType::Date)),
         vec![0, 0, 0, 4, 127, 255, 255, 226]
     );
     assert_eq!((2_u32.pow(31) - 30).to_be_bytes(), [127, 255, 255, 226]);
@@ -240,7 +257,7 @@ fn naive_date_serialization() {
     // 1970-01-31 is 2^31 + 30
     let after_epoch: NaiveDate = NaiveDate::from_ymd_opt(1970, 1, 31).unwrap();
     assert_eq!(
-        serialized(after_epoch, ColumnType::Date),
+        serialized(after_epoch, ColumnType::Native(NativeType::Date)),
         vec![0, 0, 0, 4, 128, 0, 0, 30]
     );
     assert_eq!((2_u32.pow(31) + 30).to_be_bytes(), [128, 0, 0, 30]);
@@ -252,7 +269,7 @@ fn date_serialization() {
     // 1970-01-31 is 2^31
     let unix_epoch = time::Date::from_ordinal_date(1970, 1).unwrap();
     assert_eq!(
-        serialized(unix_epoch, ColumnType::Date),
+        serialized(unix_epoch, ColumnType::Native(NativeType::Date)),
         vec![0, 0, 0, 4, 128, 0, 0, 0]
     );
     assert_eq!(2_u32.pow(31).to_be_bytes(), [128, 0, 0, 0]);
@@ -260,7 +277,7 @@ fn date_serialization() {
     // 1969-12-02 is 2^31 - 30
     let before_epoch = time::Date::from_calendar_date(1969, time::Month::December, 2).unwrap();
     assert_eq!(
-        serialized(before_epoch, ColumnType::Date),
+        serialized(before_epoch, ColumnType::Native(NativeType::Date)),
         vec![0, 0, 0, 4, 127, 255, 255, 226]
     );
     assert_eq!((2_u32.pow(31) - 30).to_be_bytes(), [127, 255, 255, 226]);
@@ -268,7 +285,7 @@ fn date_serialization() {
     // 1970-01-31 is 2^31 + 30
     let after_epoch = time::Date::from_calendar_date(1970, time::Month::January, 31).unwrap();
     assert_eq!(
-        serialized(after_epoch, ColumnType::Date),
+        serialized(after_epoch, ColumnType::Native(NativeType::Date)),
         vec![0, 0, 0, 4, 128, 0, 0, 30]
     );
     assert_eq!((2_u32.pow(31) + 30).to_be_bytes(), [128, 0, 0, 30]);
@@ -281,7 +298,7 @@ fn date_serialization() {
         [127, 189, 75, 125]
     );
     assert_eq!(
-        serialized(long_before_epoch, ColumnType::Date),
+        serialized(long_before_epoch, ColumnType::Native(NativeType::Date)),
         vec![0, 0, 0, 4, 127, 189, 75, 125]
     );
 
@@ -293,7 +310,7 @@ fn date_serialization() {
         [128, 44, 192, 160]
     );
     assert_eq!(
-        serialized(long_after_epoch, ColumnType::Date),
+        serialized(long_after_epoch, ColumnType::Native(NativeType::Date)),
         vec![0, 0, 0, 4, 128, 44, 192, 160]
     );
 }
@@ -310,7 +327,7 @@ fn cql_time_serialization() {
     // Invalid values are also serialized correctly - database will respond with an error
     for test_val in [0, 1, 15, 18463, max_time, -1, -324234, max_time + 16].into_iter() {
         let test_time: CqlTime = CqlTime(test_val);
-        let bytes: Vec<u8> = serialized(test_time, ColumnType::Time);
+        let bytes: Vec<u8> = serialized(test_time, ColumnType::Native(NativeType::Time));
 
         let mut expected_bytes: Vec<u8> = vec![0, 0, 0, 8];
         expected_bytes.extend_from_slice(&test_val.to_be_bytes());
@@ -340,7 +357,7 @@ fn naive_time_serialization() {
         ),
     ];
     for (time, expected) in test_cases {
-        let bytes = serialized(time, ColumnType::Time);
+        let bytes = serialized(time, ColumnType::Native(NativeType::Time));
 
         let mut expected_bytes: Vec<u8> = vec![0, 0, 0, 8];
         expected_bytes.extend_from_slice(&expected);
@@ -375,7 +392,7 @@ fn time_serialization() {
         ),
     ];
     for (time, expected) in test_cases {
-        let bytes = serialized(time, ColumnType::Time);
+        let bytes = serialized(time, ColumnType::Native(NativeType::Time));
 
         let mut expected_bytes: Vec<u8> = vec![0, 0, 0, 8];
         expected_bytes.extend_from_slice(&expected);
@@ -390,7 +407,7 @@ fn cql_timestamp_serialization() {
 
     for test_val in &[0, -1, 1, -45345346, 453451, i64::MIN, i64::MAX] {
         let test_timestamp: CqlTimestamp = CqlTimestamp(*test_val);
-        let bytes: Vec<u8> = serialized(test_timestamp, ColumnType::Timestamp);
+        let bytes: Vec<u8> = serialized(test_timestamp, ColumnType::Native(NativeType::Timestamp));
 
         let mut expected_bytes: Vec<u8> = vec![0, 0, 0, 8];
         expected_bytes.extend_from_slice(&test_val.to_be_bytes());
@@ -443,7 +460,7 @@ fn naive_date_time_serialization() {
     ];
     for (datetime, expected) in test_cases {
         let test_datetime = datetime.and_utc();
-        let bytes: Vec<u8> = serialized(test_datetime, ColumnType::Timestamp);
+        let bytes: Vec<u8> = serialized(test_datetime, ColumnType::Native(NativeType::Timestamp));
 
         let mut expected_bytes: Vec<u8> = vec![0, 0, 0, 8];
         expected_bytes.extend_from_slice(&expected);
@@ -505,7 +522,7 @@ fn offset_date_time_serialization() {
         ),
     ];
     for (datetime, expected) in test_cases {
-        let bytes: Vec<u8> = serialized(datetime, ColumnType::Timestamp);
+        let bytes: Vec<u8> = serialized(datetime, ColumnType::Native(NativeType::Timestamp));
 
         let mut expected_bytes: Vec<u8> = vec![0, 0, 0, 8];
         expected_bytes.extend_from_slice(&expected);
@@ -532,7 +549,7 @@ fn timeuuid_serialization() {
 
     for uuid_bytes in &tests {
         let uuid = Uuid::from_slice(uuid_bytes.as_ref()).unwrap();
-        let uuid_serialized: Vec<u8> = serialized(uuid, ColumnType::Uuid);
+        let uuid_serialized: Vec<u8> = serialized(uuid, ColumnType::Native(NativeType::Uuid));
 
         let mut expected_serialized: Vec<u8> = vec![0, 0, 0, 16];
         expected_serialized.extend_from_slice(uuid_bytes.as_ref());
@@ -567,7 +584,7 @@ fn cqlduration_serialization() {
         nanoseconds: 3,
     };
     assert_eq!(
-        serialized(duration, ColumnType::Duration),
+        serialized(duration, ColumnType::Native(NativeType::Duration)),
         vec![0, 0, 0, 3, 2, 4, 6]
     );
 }
@@ -576,7 +593,7 @@ fn cqlduration_serialization() {
 fn box_serialization() {
     let x: Box<i32> = Box::new(123);
     assert_eq!(
-        serialized(x, ColumnType::Int),
+        serialized(x, ColumnType::Native(NativeType::Int)),
         vec![0, 0, 0, 4, 0, 0, 0, 123]
     );
 }
@@ -585,7 +602,13 @@ fn box_serialization() {
 fn vec_set_serialization() {
     let m = vec!["ala", "ma", "kota"];
     assert_eq!(
-        serialized(m, ColumnType::Set(Box::new(ColumnType::Text))),
+        serialized(
+            m,
+            ColumnType::Collection {
+                frozen: (),
+                type_: CollectionType::Set(Box::new(ColumnType::Native(NativeType::Text)))
+            }
+        ),
         vec![
             0, 0, 0, 25, // 25 bytes
             0, 0, 0, 3, // 3 items
@@ -600,7 +623,13 @@ fn vec_set_serialization() {
 fn slice_set_serialization() {
     let m = ["ala", "ma", "kota"];
     assert_eq!(
-        serialized(m.as_ref(), ColumnType::Set(Box::new(ColumnType::Text))),
+        serialized(
+            m.as_ref(),
+            ColumnType::Collection {
+                frozen: (),
+                type_: CollectionType::Set(Box::new(ColumnType::Native(NativeType::Text)))
+            }
+        ),
         vec![
             0, 0, 0, 25, // 25 bytes
             0, 0, 0, 3, // 3 items
@@ -635,7 +664,13 @@ type DumbBuildHasher = BuildHasherDefault<DumbHasher>;
 fn hashset_serialization() {
     let m: HashSet<&'static str, DumbBuildHasher> = ["ala", "ma", "kota"].into_iter().collect();
     assert_eq!(
-        serialized(m, ColumnType::Set(Box::new(ColumnType::Text))),
+        serialized(
+            m,
+            ColumnType::Collection {
+                frozen: (),
+                type_: CollectionType::Set(Box::new(ColumnType::Native(NativeType::Text)))
+            }
+        ),
         vec![
             0, 0, 0, 25, // 25 bytes
             0, 0, 0, 3, // 3 items
@@ -653,7 +688,13 @@ fn hashmap_serialization() {
     assert_eq!(
         serialized(
             m,
-            ColumnType::Map(Box::new(ColumnType::Text), Box::new(ColumnType::Int))
+            ColumnType::Collection {
+                frozen: (),
+                type_: CollectionType::Map(
+                    Box::new(ColumnType::Native(NativeType::Text)),
+                    Box::new(ColumnType::Native(NativeType::Int))
+                )
+            }
         ),
         vec![
             0, 0, 0, 49, // 49 bytes
@@ -672,7 +713,13 @@ fn hashmap_serialization() {
 fn btreeset_serialization() {
     let m: BTreeSet<&'static str> = ["ala", "ma", "kota"].into_iter().collect();
     assert_eq!(
-        serialized(m, ColumnType::Set(Box::new(ColumnType::Text))),
+        serialized(
+            m,
+            ColumnType::Collection {
+                frozen: (),
+                type_: CollectionType::Set(Box::new(ColumnType::Native(NativeType::Text)))
+            }
+        ),
         vec![
             0, 0, 0, 25, // 25 bytes
             0, 0, 0, 3, // 3 items
@@ -689,7 +736,13 @@ fn btreemap_serialization() {
     assert_eq!(
         serialized(
             m,
-            ColumnType::Map(Box::new(ColumnType::Text), Box::new(ColumnType::Int))
+            ColumnType::Collection {
+                frozen: (),
+                type_: CollectionType::Map(
+                    Box::new(ColumnType::Native(NativeType::Text)),
+                    Box::new(ColumnType::Native(NativeType::Int))
+                )
+            }
         ),
         vec![
             0, 0, 0, 49, // 49 bytes
@@ -711,7 +764,7 @@ fn cqlvalue_serialization() {
 
     // Empty
     assert_eq!(
-        serialized(CqlValue::Empty, ColumnType::Int),
+        serialized(CqlValue::Empty, ColumnType::Native(NativeType::Int)),
         vec![0, 0, 0, 0],
     );
 
@@ -725,12 +778,15 @@ fn cqlvalue_serialization() {
         ],
     };
     let typ = ColumnType::UserDefinedType {
-        type_name: "t".to_string(),
-        keyspace: "ks".to_string(),
-        field_types: vec![
-            ("foo".to_string(), ColumnType::Int),
-            ("bar".to_string(), ColumnType::Text),
-        ],
+        frozen: (),
+        definition: Ok(Arc::new(UserDefinedType {
+            type_name: "t".to_string(),
+            keyspace: "ks".to_string(),
+            field_types: vec![
+                ("foo".to_string(), ColumnType::Native(NativeType::Int)),
+                ("bar".to_string(), ColumnType::Native(NativeType::Text)),
+            ],
+        })),
     };
 
     assert_eq!(
@@ -764,7 +820,10 @@ fn cqlvalue_serialization() {
 
     // Tuples
     let tup = CqlValue::Tuple(vec![Some(CqlValue::Int(123)), None]);
-    let typ = ColumnType::Tuple(vec![ColumnType::Int, ColumnType::Text]);
+    let typ = ColumnType::Tuple(vec![
+        ColumnType::Native(NativeType::Int),
+        ColumnType::Native(NativeType::Text),
+    ]);
     assert_eq!(
         serialized(tup, typ),
         vec![
@@ -779,7 +838,11 @@ fn cqlvalue_serialization() {
     // as nulls.
     // TODO: Need a database test for that
     let tup = CqlValue::Tuple(vec![Some(CqlValue::Int(123)), None]);
-    let typ = ColumnType::Tuple(vec![ColumnType::Int, ColumnType::Text, ColumnType::Counter]);
+    let typ = ColumnType::Tuple(vec![
+        ColumnType::Native(NativeType::Int),
+        ColumnType::Native(NativeType::Text),
+        ColumnType::Native(NativeType::Counter),
+    ]);
     assert_eq!(
         serialized(tup, typ),
         vec![
@@ -796,7 +859,7 @@ fn secret_serialization() {
     use secrecy::Secret;
     let secret = Secret::new(987654i32);
     assert_eq!(
-        serialized(secret, ColumnType::Int),
+        serialized(secret, ColumnType::Native(NativeType::Int)),
         vec![0, 0, 0, 4, 0x00, 0x0f, 0x12, 0x06]
     );
 }
@@ -804,12 +867,12 @@ fn secret_serialization() {
 #[test]
 fn option_value() {
     assert_eq!(
-        serialized(Some(32_i32), ColumnType::Int),
+        serialized(Some(32_i32), ColumnType::Native(NativeType::Int)),
         vec![0, 0, 0, 4, 0, 0, 0, 32]
     );
     let null_i32: Option<i32> = None;
     assert_eq!(
-        serialized(null_i32, ColumnType::Int),
+        serialized(null_i32, ColumnType::Native(NativeType::Int)),
         &(-1_i32).to_be_bytes()[..]
     );
 }
@@ -817,19 +880,19 @@ fn option_value() {
 #[test]
 fn unset_value() {
     assert_eq!(
-        serialized(Unset, ColumnType::Int),
+        serialized(Unset, ColumnType::Native(NativeType::Int)),
         &(-2_i32).to_be_bytes()[..]
     );
 
     let unset_i32: MaybeUnset<i32> = MaybeUnset::Unset;
     assert_eq!(
-        serialized(unset_i32, ColumnType::Int),
+        serialized(unset_i32, ColumnType::Native(NativeType::Int)),
         &(-2_i32).to_be_bytes()[..]
     );
 
     let set_i32: MaybeUnset<i32> = MaybeUnset::Set(32);
     assert_eq!(
-        serialized(set_i32, ColumnType::Int),
+        serialized(set_i32, ColumnType::Native(NativeType::Int)),
         vec![0, 0, 0, 4, 0, 0, 0, 32]
     );
 }
@@ -959,9 +1022,9 @@ fn empty_array_value_list() {
 fn slice_value_list() {
     let values: &[i32] = &[1, 2, 3];
     let cols = &[
-        col_spec("ala", ColumnType::Int),
-        col_spec("ma", ColumnType::Int),
-        col_spec("kota", ColumnType::Int),
+        col_spec("ala", ColumnType::Native(NativeType::Int)),
+        col_spec("ma", ColumnType::Native(NativeType::Int)),
+        col_spec("kota", ColumnType::Native(NativeType::Int)),
     ];
     let serialized = serialize_values(values, cols);
 
@@ -979,9 +1042,9 @@ fn slice_value_list() {
 fn vec_value_list() {
     let values: Vec<i32> = vec![1, 2, 3];
     let cols = &[
-        col_spec("ala", ColumnType::Int),
-        col_spec("ma", ColumnType::Int),
-        col_spec("kota", ColumnType::Int),
+        col_spec("ala", ColumnType::Native(NativeType::Int)),
+        col_spec("ma", ColumnType::Native(NativeType::Int)),
+        col_spec("kota", ColumnType::Native(NativeType::Int)),
     ];
     let serialized = serialize_values(values, cols);
 
@@ -1053,7 +1116,7 @@ fn tuple_value_list() {
         let typs = expected
             .clone()
             .enumerate()
-            .map(|(i, _)| col_spec(&format!("col_{i}"), ColumnType::TinyInt))
+            .map(|(i, _)| col_spec(&format!("col_{i}"), ColumnType::Native(NativeType::TinyInt)))
             .collect::<Vec<_>>();
         let serialized = serialize_values(tuple, &typs);
         assert_eq!(serialized.len() as usize, expected.len());
@@ -1134,9 +1197,9 @@ fn map_value_list() {
     // but the impl sorts properly.
     let row = BTreeMap::from_iter([("ala", 1), ("ma", 2), ("kota", 3)]);
     let cols = &[
-        col_spec("ala", ColumnType::Int),
-        col_spec("ma", ColumnType::Int),
-        col_spec("kota", ColumnType::Int),
+        col_spec("ala", ColumnType::Native(NativeType::Int)),
+        col_spec("ma", ColumnType::Native(NativeType::Int)),
+        col_spec("kota", ColumnType::Native(NativeType::Int)),
     ];
     let new_values = serialize_values_only_new(row.clone(), cols);
     assert_eq!(
@@ -1162,9 +1225,9 @@ fn map_value_list() {
 fn ref_value_list() {
     let values: &[i32] = &[1, 2, 3];
     let typs = &[
-        col_spec("col_1", ColumnType::Int),
-        col_spec("col_2", ColumnType::Int),
-        col_spec("col_3", ColumnType::Int),
+        col_spec("col_1", ColumnType::Native(NativeType::Int)),
+        col_spec("col_2", ColumnType::Native(NativeType::Int)),
+        col_spec("col_3", ColumnType::Native(NativeType::Int)),
     ];
     let serialized = serialize_values::<&&[i32]>(&values, typs);
 
@@ -1258,8 +1321,8 @@ fn slice_batch_values() {
     let mut iters = make_batch_value_iters(&batch_values, &legacy_batch_values);
     {
         let cols = &[
-            col_spec("a", ColumnType::TinyInt),
-            col_spec("b", ColumnType::TinyInt),
+            col_spec("a", ColumnType::Native(NativeType::TinyInt)),
+            col_spec("b", ColumnType::Native(NativeType::TinyInt)),
         ];
         let request = serialize_batch_value_iterators(&mut iters, cols);
         assert_eq!(request, vec![0, 2, 0, 0, 0, 1, 1, 0, 0, 0, 1, 2]);
@@ -1267,10 +1330,10 @@ fn slice_batch_values() {
 
     {
         let cols = &[
-            col_spec("a", ColumnType::TinyInt),
-            col_spec("b", ColumnType::TinyInt),
-            col_spec("c", ColumnType::TinyInt),
-            col_spec("d", ColumnType::TinyInt),
+            col_spec("a", ColumnType::Native(NativeType::TinyInt)),
+            col_spec("b", ColumnType::Native(NativeType::TinyInt)),
+            col_spec("c", ColumnType::Native(NativeType::TinyInt)),
+            col_spec("d", ColumnType::Native(NativeType::TinyInt)),
         ];
         let request = serialize_batch_value_iterators(&mut iters, cols);
         assert_eq!(
@@ -1280,7 +1343,7 @@ fn slice_batch_values() {
     }
 
     {
-        let cols = &[col_spec("a", ColumnType::TinyInt)];
+        let cols = &[col_spec("a", ColumnType::Native(NativeType::TinyInt))];
         let request = serialize_batch_value_iterators(&mut iters, cols);
         assert_eq!(request, vec![0, 1, 0, 0, 0, 1, 6]);
     }
@@ -1301,8 +1364,8 @@ fn vec_batch_values() {
     let mut iters = make_batch_value_iters(&batch_values, &legacy_batch_values);
     {
         let cols = &[
-            col_spec("a", ColumnType::TinyInt),
-            col_spec("b", ColumnType::TinyInt),
+            col_spec("a", ColumnType::Native(NativeType::TinyInt)),
+            col_spec("b", ColumnType::Native(NativeType::TinyInt)),
         ];
         let request = serialize_batch_value_iterators(&mut iters, cols);
         assert_eq!(request, vec![0, 2, 0, 0, 0, 1, 1, 0, 0, 0, 1, 2]);
@@ -1310,10 +1373,10 @@ fn vec_batch_values() {
 
     {
         let cols = &[
-            col_spec("a", ColumnType::TinyInt),
-            col_spec("b", ColumnType::TinyInt),
-            col_spec("c", ColumnType::TinyInt),
-            col_spec("d", ColumnType::TinyInt),
+            col_spec("a", ColumnType::Native(NativeType::TinyInt)),
+            col_spec("b", ColumnType::Native(NativeType::TinyInt)),
+            col_spec("c", ColumnType::Native(NativeType::TinyInt)),
+            col_spec("d", ColumnType::Native(NativeType::TinyInt)),
         ];
         let request = serialize_batch_value_iterators(&mut iters, cols);
         assert_eq!(
@@ -1323,7 +1386,7 @@ fn vec_batch_values() {
     }
 
     {
-        let cols = &[col_spec("a", ColumnType::TinyInt)];
+        let cols = &[col_spec("a", ColumnType::Native(NativeType::TinyInt))];
         let request = serialize_batch_value_iterators(&mut iters, cols);
         assert_eq!(request, vec![0, 1, 0, 0, 0, 1, 6]);
     }
@@ -1336,8 +1399,8 @@ fn tuple_batch_values() {
         let mut iters = make_batch_value_iters(&tuple, &legacy_tuple);
         for i in 0..size {
             let cols = &[
-                col_spec("a", ColumnType::Int),
-                col_spec("b", ColumnType::Int),
+                col_spec("a", ColumnType::Native(NativeType::Int)),
+                col_spec("b", ColumnType::Native(NativeType::Int)),
             ];
 
             let request = serialize_batch_value_iterators(&mut iters, cols);
@@ -1528,8 +1591,8 @@ fn tuple_batch_values() {
 fn ref_batch_values() {
     let batch_values: &[&[i8]] = &[&[1, 2], &[2, 3, 4, 5], &[6]];
     let cols = &[
-        col_spec("a", ColumnType::TinyInt),
-        col_spec("b", ColumnType::TinyInt),
+        col_spec("a", ColumnType::Native(NativeType::TinyInt)),
+        col_spec("b", ColumnType::Native(NativeType::TinyInt)),
     ];
 
     return check_ref_bv::<&&&&&[&[i8]]>(&&&&batch_values, cols);
@@ -1557,17 +1620,17 @@ fn check_ref_tuple() {
     }
     let s = String::from("hello");
     let tuple: ((&str,),) = ((&s,),);
-    let cols: &[&[ColumnSpec]] = &[&[col_spec("a", ColumnType::Text)]];
+    let cols: &[&[ColumnSpec]] = &[&[col_spec("a", ColumnType::Native(NativeType::Text))]];
     assert_has_batch_values::<&_>(&tuple, cols);
     let tuple2: ((&str, &str), (&str, &str)) = ((&s, &s), (&s, &s));
     let cols: &[&[ColumnSpec]] = &[
         &[
-            col_spec("a", ColumnType::Text),
-            col_spec("b", ColumnType::Text),
+            col_spec("a", ColumnType::Native(NativeType::Text)),
+            col_spec("b", ColumnType::Native(NativeType::Text)),
         ],
         &[
-            col_spec("a", ColumnType::Text),
-            col_spec("b", ColumnType::Text),
+            col_spec("a", ColumnType::Native(NativeType::Text)),
+            col_spec("b", ColumnType::Native(NativeType::Text)),
         ],
     ];
     assert_has_batch_values::<&_>(&tuple2, cols);
@@ -1592,7 +1655,7 @@ fn check_batch_values_iterator_is_not_lending() {
         let mut it = bv.batch_values_iter();
         let mut it2 = bv.batch_values_iter();
 
-        let columns = &[col_spec("a", ColumnType::Int)];
+        let columns = &[col_spec("a", ColumnType::Native(NativeType::Int))];
         let ctx = RowSerializationContext { columns };
         let mut data = Vec::new();
         let mut writer = RowWriter::new(&mut data);

@@ -298,7 +298,7 @@ mod tests {
         let column_spec = ColumnSpec {
             table_spec,
             name: "column0".to_string(),
-            typ: ColumnType::Int,
+            typ: ColumnType::Native(scylla_cql::frame::response::result::NativeType::Int),
         };
 
         QueryResult {

@@ -1,4 +1,5 @@
 use crate::cql_to_rust::{FromRow, FromRowError};
+use crate::frame::response;
 use crate::frame::response::event::SchemaChangeEvent;
 use crate::frame::types::vint_decode;
 use crate::frame::value::{Counter, CqlDate, CqlDuration, CqlTime, CqlTimestamp, CqlTimeuuid};
@@ -7,12 +8,14 @@ use bigdecimal::BigDecimal;
 use byteorder::{BigEndian, ReadBytesExt};
 use bytes::{Buf, Bytes};
 use num_bigint::BigInt;
+use std::sync::Arc;
 use std::{
     convert::{TryFrom, TryInto},
     net::IpAddr,
     result::Result as StdResult,
     str,
 };
+use strum_macros::EnumString;
 use uuid::Uuid;
 
 #[cfg(feature = "chrono")]
@@ -42,8 +45,32 @@ pub struct TableSpec {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ColumnType {
+pub enum CqlType<F, E> {
     Custom(String),
+    Native(NativeType),
+    Collection {
+        frozen: F,
+        type_: CollectionType<F, E>,
+    },
+    Tuple(Vec<CqlType<F, E>>),
+    UserDefinedType {
+        frozen: F,
+        // Using Arc here in order not to have many copies of the same definition
+        definition: StdResult<Arc<UserDefinedType<F, E>>, E>,
+    },
+}
+
+/// Definition of a user-defined type
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UserDefinedType<F, E> {
+    pub type_name: String,
+    pub keyspace: String,
+    pub field_types: Vec<(String, CqlType<F, E>)>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, EnumString)]
+#[strum(serialize_all = "lowercase")]
+pub enum NativeType {
     Ascii,
     Boolean,
     Blob,
@@ -58,22 +85,22 @@ pub enum ColumnType {
     Text,
     Timestamp,
     Inet,
-    List(Box<ColumnType>),
-    Map(Box<ColumnType>, Box<ColumnType>),
-    Set(Box<ColumnType>),
-    UserDefinedType {
-        type_name: String,
-        keyspace: String,
-        field_types: Vec<(String, ColumnType)>,
-    },
     SmallInt,
     TinyInt,
     Time,
     Timeuuid,
-    Tuple(Vec<ColumnType>),
     Uuid,
     Varint,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CollectionType<F, E> {
+    List(Box<CqlType<F, E>>),
+    Map(Box<CqlType<F, E>>, Box<CqlType<F, E>>),
+    Set(Box<CqlType<F, E>>),
+}
+
+pub type ColumnType = CqlType<(), ()>;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum CqlValue {
@@ -128,11 +155,9 @@ impl ColumnType {
     pub(crate) fn supports_special_empty_value(&self) -> bool {
         #[allow(clippy::match_like_matches_macro)]
         match self {
-            ColumnType::Counter
-            | ColumnType::Duration
-            | ColumnType::List(_)
-            | ColumnType::Map(_, _)
-            | ColumnType::Set(_)
+            ColumnType::Native(NativeType::Counter)
+            | ColumnType::Native(NativeType::Duration)
+            | ColumnType::Collection { .. }
             | ColumnType::UserDefinedType { .. }
             | ColumnType::Custom(_) => false,
 
@@ -451,39 +476,50 @@ fn deser_table_spec(buf: &mut &[u8]) -> StdResult<TableSpec, ParseError> {
 }
 
 fn deser_type(buf: &mut &[u8]) -> StdResult<ColumnType, ParseError> {
-    use ColumnType::*;
+    use CollectionType::*;
+    use CqlType::*;
+    use NativeType::*;
     let id = types::read_short(buf)?;
     Ok(match id {
         0x0000 => {
             let type_str: String = types::read_string(buf)?.to_string();
             match type_str.as_str() {
-                "org.apache.cassandra.db.marshal.DurationType" => Duration,
+                "org.apache.cassandra.db.marshal.DurationType" => Native(Duration),
                 _ => Custom(type_str),
             }
         }
-        0x0001 => Ascii,
-        0x0002 => BigInt,
-        0x0003 => Blob,
-        0x0004 => Boolean,
-        0x0005 => Counter,
-        0x0006 => Decimal,
-        0x0007 => Double,
-        0x0008 => Float,
-        0x0009 => Int,
-        0x000B => Timestamp,
-        0x000C => Uuid,
-        0x000D => Text,
-        0x000E => Varint,
-        0x000F => Timeuuid,
-        0x0010 => Inet,
-        0x0011 => Date,
-        0x0012 => Time,
-        0x0013 => SmallInt,
-        0x0014 => TinyInt,
-        0x0015 => Duration,
-        0x0020 => List(Box::new(deser_type(buf)?)),
-        0x0021 => Map(Box::new(deser_type(buf)?), Box::new(deser_type(buf)?)),
-        0x0022 => Set(Box::new(deser_type(buf)?)),
+        0x0001 => Native(Ascii),
+        0x0002 => Native(BigInt),
+        0x0003 => Native(Blob),
+        0x0004 => Native(Boolean),
+        0x0005 => Native(Counter),
+        0x0006 => Native(Decimal),
+        0x0007 => Native(Double),
+        0x0008 => Native(Float),
+        0x0009 => Native(Int),
+        0x000B => Native(Timestamp),
+        0x000C => Native(Uuid),
+        0x000D => Native(Text),
+        0x000E => Native(Varint),
+        0x000F => Native(Timeuuid),
+        0x0010 => Native(Inet),
+        0x0011 => Native(Date),
+        0x0012 => Native(Time),
+        0x0013 => Native(SmallInt),
+        0x0014 => Native(TinyInt),
+        0x0015 => Native(Duration),
+        0x0020 => Collection {
+            frozen: (),
+            type_: List(Box::new(deser_type(buf)?)),
+        },
+        0x0021 => Collection {
+            frozen: (),
+            type_: Map(Box::new(deser_type(buf)?), Box::new(deser_type(buf)?)),
+        },
+        0x0022 => Collection {
+            frozen: (),
+            type_: Set(Box::new(deser_type(buf)?)),
+        },
         0x0030 => {
             let keyspace_name: String = types::read_string(buf)?.to_string();
             let type_name: String = types::read_string(buf)?.to_string();
@@ -499,9 +535,12 @@ fn deser_type(buf: &mut &[u8]) -> StdResult<ColumnType, ParseError> {
             }
 
             UserDefinedType {
-                type_name,
-                keyspace: keyspace_name,
-                field_types,
+                frozen: (),
+                definition: Ok(Arc::new(response::result::UserDefinedType {
+                    type_name,
+                    keyspace: keyspace_name,
+                    field_types,
+                })),
             }
         }
         0x0031 => {
@@ -613,11 +652,13 @@ fn deser_prepared_metadata(buf: &mut &[u8]) -> StdResult<PreparedMetadata, Parse
 }
 
 pub fn deser_cql_value(typ: &ColumnType, buf: &mut &[u8]) -> StdResult<CqlValue, ParseError> {
-    use ColumnType::*;
+    use CollectionType::*;
+    use CqlType::*;
+    use NativeType::*;
 
     if buf.is_empty() {
         match typ {
-            Ascii | Blob | Text => {
+            Native(Ascii) | Native(Blob) | Native(Text) => {
                 // can't be empty
             }
             _ => return Ok(CqlValue::Empty),
@@ -631,7 +672,7 @@ pub fn deser_cql_value(typ: &ColumnType, buf: &mut &[u8]) -> StdResult<CqlValue,
                 type_str
             )));
         }
-        Ascii => {
+        Native(Ascii) => {
             if !buf.is_ascii() {
                 return Err(ParseError::BadIncomingData(
                     "String is not ascii!".to_string(),
@@ -639,7 +680,7 @@ pub fn deser_cql_value(typ: &ColumnType, buf: &mut &[u8]) -> StdResult<CqlValue,
             }
             CqlValue::Ascii(str::from_utf8(buf)?.to_owned())
         }
-        Boolean => {
+        Native(Boolean) => {
             if buf.len() != 1 {
                 return Err(ParseError::BadIncomingData(format!(
                     "Buffer length should be 1 not {}",
@@ -648,8 +689,8 @@ pub fn deser_cql_value(typ: &ColumnType, buf: &mut &[u8]) -> StdResult<CqlValue,
             }
             CqlValue::Boolean(buf[0] != 0x00)
         }
-        Blob => CqlValue::Blob(buf.to_vec()),
-        Date => {
+        Native(Blob) => CqlValue::Blob(buf.to_vec()),
+        Native(Date) => {
             if buf.len() != 4 {
                 return Err(ParseError::BadIncomingData(format!(
                     "Buffer length should be 4 not {}",
@@ -660,7 +701,7 @@ pub fn deser_cql_value(typ: &ColumnType, buf: &mut &[u8]) -> StdResult<CqlValue,
             let date_value = buf.read_u32::<BigEndian>()?;
             CqlValue::Date(CqlDate(date_value))
         }
-        Counter => {
+        Native(Counter) => {
             if buf.len() != 8 {
                 return Err(ParseError::BadIncomingData(format!(
                     "Buffer length should be 8 not {}",
@@ -669,14 +710,14 @@ pub fn deser_cql_value(typ: &ColumnType, buf: &mut &[u8]) -> StdResult<CqlValue,
             }
             CqlValue::Counter(crate::frame::value::Counter(buf.read_i64::<BigEndian>()?))
         }
-        Decimal => {
+        Native(Decimal) => {
             let scale = types::read_int(buf)? as i64;
             let int_value = num_bigint::BigInt::from_signed_bytes_be(buf);
             let big_decimal: BigDecimal = BigDecimal::from((int_value, scale));
 
             CqlValue::Decimal(big_decimal)
         }
-        Double => {
+        Native(Double) => {
             if buf.len() != 8 {
                 return Err(ParseError::BadIncomingData(format!(
                     "Buffer length should be 8 not {}",
@@ -685,7 +726,7 @@ pub fn deser_cql_value(typ: &ColumnType, buf: &mut &[u8]) -> StdResult<CqlValue,
             }
             CqlValue::Double(buf.read_f64::<BigEndian>()?)
         }
-        Float => {
+        Native(Float) => {
             if buf.len() != 4 {
                 return Err(ParseError::BadIncomingData(format!(
                     "Buffer length should be 4 not {}",
@@ -694,7 +735,7 @@ pub fn deser_cql_value(typ: &ColumnType, buf: &mut &[u8]) -> StdResult<CqlValue,
             }
             CqlValue::Float(buf.read_f32::<BigEndian>()?)
         }
-        Int => {
+        Native(Int) => {
             if buf.len() != 4 {
                 return Err(ParseError::BadIncomingData(format!(
                     "Buffer length should be 4 not {}",
@@ -703,7 +744,7 @@ pub fn deser_cql_value(typ: &ColumnType, buf: &mut &[u8]) -> StdResult<CqlValue,
             }
             CqlValue::Int(buf.read_i32::<BigEndian>()?)
         }
-        SmallInt => {
+        Native(SmallInt) => {
             if buf.len() != 2 {
                 return Err(ParseError::BadIncomingData(format!(
                     "Buffer length should be 2 not {}",
@@ -713,7 +754,7 @@ pub fn deser_cql_value(typ: &ColumnType, buf: &mut &[u8]) -> StdResult<CqlValue,
 
             CqlValue::SmallInt(buf.read_i16::<BigEndian>()?)
         }
-        TinyInt => {
+        Native(TinyInt) => {
             if buf.len() != 1 {
                 return Err(ParseError::BadIncomingData(format!(
                     "Buffer length should be 1 not {}",
@@ -722,7 +763,7 @@ pub fn deser_cql_value(typ: &ColumnType, buf: &mut &[u8]) -> StdResult<CqlValue,
             }
             CqlValue::TinyInt(buf.read_i8()?)
         }
-        BigInt => {
+        Native(BigInt) => {
             if buf.len() != 8 {
                 return Err(ParseError::BadIncomingData(format!(
                     "Buffer length should be 8 not {}",
@@ -731,8 +772,8 @@ pub fn deser_cql_value(typ: &ColumnType, buf: &mut &[u8]) -> StdResult<CqlValue,
             }
             CqlValue::BigInt(buf.read_i64::<BigEndian>()?)
         }
-        Text => CqlValue::Text(str::from_utf8(buf)?.to_owned()),
-        Timestamp => {
+        Native(Text) => CqlValue::Text(str::from_utf8(buf)?.to_owned()),
+        Native(Timestamp) => {
             if buf.len() != 8 {
                 return Err(ParseError::BadIncomingData(format!(
                     "Buffer length should be 8 not {}",
@@ -743,7 +784,7 @@ pub fn deser_cql_value(typ: &ColumnType, buf: &mut &[u8]) -> StdResult<CqlValue,
 
             CqlValue::Timestamp(CqlTimestamp(millis))
         }
-        Time => {
+        Native(Time) => {
             if buf.len() != 8 {
                 return Err(ParseError::BadIncomingData(format!(
                     "Buffer length should be 8 not {}",
@@ -761,7 +802,7 @@ pub fn deser_cql_value(typ: &ColumnType, buf: &mut &[u8]) -> StdResult<CqlValue,
 
             CqlValue::Time(CqlTime(nanoseconds))
         }
-        Timeuuid => {
+        Native(Timeuuid) => {
             if buf.len() != 16 {
                 return Err(ParseError::BadIncomingData(format!(
                     "Buffer length should be 16 not {}",
@@ -771,7 +812,7 @@ pub fn deser_cql_value(typ: &ColumnType, buf: &mut &[u8]) -> StdResult<CqlValue,
             let uuid = uuid::Uuid::from_slice(buf).expect("Deserializing Uuid failed.");
             CqlValue::Timeuuid(CqlTimeuuid::from(uuid))
         }
-        Duration => {
+        Native(Duration) => {
             let months = i32::try_from(vint_decode(buf)?)?;
             let days = i32::try_from(vint_decode(buf)?)?;
             let nanoseconds = vint_decode(buf)?;
@@ -782,7 +823,7 @@ pub fn deser_cql_value(typ: &ColumnType, buf: &mut &[u8]) -> StdResult<CqlValue,
                 nanoseconds,
             })
         }
-        Inet => CqlValue::Inet(match buf.len() {
+        Native(Inet) => CqlValue::Inet(match buf.len() {
             4 => {
                 let ret = IpAddr::from(<[u8; 4]>::try_from(&buf[0..4])?);
                 buf.advance(4);
@@ -800,7 +841,7 @@ pub fn deser_cql_value(typ: &ColumnType, buf: &mut &[u8]) -> StdResult<CqlValue,
                 )));
             }
         }),
-        Uuid => {
+        Native(Uuid) => {
             if buf.len() != 16 {
                 return Err(ParseError::BadIncomingData(format!(
                     "Buffer length should be 16 not {}",
@@ -810,8 +851,11 @@ pub fn deser_cql_value(typ: &ColumnType, buf: &mut &[u8]) -> StdResult<CqlValue,
             let uuid = uuid::Uuid::from_slice(buf).expect("Deserializing Uuid failed.");
             CqlValue::Uuid(uuid)
         }
-        Varint => CqlValue::Varint(num_bigint::BigInt::from_signed_bytes_be(buf)),
-        List(type_name) => {
+        Native(Varint) => CqlValue::Varint(num_bigint::BigInt::from_signed_bytes_be(buf)),
+        Collection {
+            frozen: (),
+            type_: List(type_name),
+        } => {
             let len: usize = types::read_int(buf)?.try_into()?;
             let mut res = Vec::with_capacity(len);
             for _ in 0..len {
@@ -820,7 +864,10 @@ pub fn deser_cql_value(typ: &ColumnType, buf: &mut &[u8]) -> StdResult<CqlValue,
             }
             CqlValue::List(res)
         }
-        Map(key_type, value_type) => {
+        Collection {
+            frozen: _,
+            type_: Map(key_type, value_type),
+        } => {
             let len: usize = types::read_int(buf)?.try_into()?;
             let mut res = Vec::with_capacity(len);
             for _ in 0..len {
@@ -832,7 +879,10 @@ pub fn deser_cql_value(typ: &ColumnType, buf: &mut &[u8]) -> StdResult<CqlValue,
             }
             CqlValue::Map(res)
         }
-        Set(type_name) => {
+        Collection {
+            frozen: _,
+            type_: Set(type_name),
+        } => {
             let len: usize = types::read_int(buf)?.try_into()?;
             let mut res = Vec::with_capacity(len);
             for _ in 0..len {
@@ -843,11 +893,15 @@ pub fn deser_cql_value(typ: &ColumnType, buf: &mut &[u8]) -> StdResult<CqlValue,
             CqlValue::Set(res)
         }
         UserDefinedType {
-            type_name,
-            keyspace,
-            field_types,
+            frozen: _,
+            definition,
         } => {
             let mut fields: Vec<(String, Option<CqlValue>)> = Vec::new();
+
+            // SAFETY: Err() holds an uninhabited type in this case. Result can never hold an error.
+            let field_types = &definition.as_ref().unwrap().field_types;
+            let keyspace = &definition.as_ref().unwrap().keyspace;
+            let type_name = &definition.as_ref().unwrap().type_name;
 
             for (field_name, field_type) in field_types {
                 // If a field is added to a UDT and we read an old (frozen ?) version of it,
@@ -965,20 +1019,24 @@ pub fn deserialize(buf: &mut &[u8]) -> StdResult<Result, ParseError> {
 #[cfg(test)]
 mod tests {
     use crate as scylla;
+    use crate::frame::response::result::{CollectionType, NativeType, UserDefinedType};
     use crate::frame::value::{Counter, CqlDate, CqlDuration, CqlTime, CqlTimestamp, CqlTimeuuid};
     use bigdecimal::BigDecimal;
     use num_bigint::BigInt;
     use num_bigint::ToBigInt;
     use scylla::frame::response::result::{ColumnType, CqlValue};
     use std::str::FromStr;
+    use std::sync::Arc;
     use uuid::Uuid;
 
     #[test]
     fn test_deserialize_text_types() {
         let buf: Vec<u8> = vec![0x41];
         let int_slice = &mut &buf[..];
-        let ascii_serialized = super::deser_cql_value(&ColumnType::Ascii, int_slice).unwrap();
-        let text_serialized = super::deser_cql_value(&ColumnType::Text, int_slice).unwrap();
+        let ascii_serialized =
+            super::deser_cql_value(&ColumnType::Native(NativeType::Ascii), int_slice).unwrap();
+        let text_serialized =
+            super::deser_cql_value(&ColumnType::Native(NativeType::Text), int_slice).unwrap();
         assert_eq!(ascii_serialized, CqlValue::Ascii("A".to_string()));
         assert_eq!(text_serialized, CqlValue::Text("A".to_string()));
     }
@@ -989,18 +1047,20 @@ mod tests {
 
         let uuid_buf: Vec<u8> = vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
         let uuid_slice = &mut &uuid_buf[..];
-        let uuid_serialize = super::deser_cql_value(&ColumnType::Uuid, uuid_slice).unwrap();
+        let uuid_serialize =
+            super::deser_cql_value(&ColumnType::Native(NativeType::Uuid), uuid_slice).unwrap();
         assert_eq!(uuid_serialize, CqlValue::Uuid(my_uuid));
 
         let my_timeuuid = CqlTimeuuid::from_str("00000000000000000000000000000001").unwrap();
         let time_uuid_serialize =
-            super::deser_cql_value(&ColumnType::Timeuuid, uuid_slice).unwrap();
+            super::deser_cql_value(&ColumnType::Native(NativeType::Timeuuid), uuid_slice).unwrap();
         assert_eq!(time_uuid_serialize, CqlValue::Timeuuid(my_timeuuid));
 
         let my_ip = "::1".parse().unwrap();
         let ip_buf: Vec<u8> = vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
         let ip_slice = &mut &ip_buf[..];
-        let ip_serialize = super::deser_cql_value(&ColumnType::Inet, ip_slice).unwrap();
+        let ip_serialize =
+            super::deser_cql_value(&ColumnType::Native(NativeType::Inet), ip_slice).unwrap();
         assert_eq!(ip_serialize, CqlValue::Inet(my_ip));
 
         let max_ip = "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff".parse().unwrap();
@@ -1008,7 +1068,8 @@ mod tests {
             255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
         ];
         let max_ip_slice = &mut &max_ip_buf[..];
-        let max_ip_serialize = super::deser_cql_value(&ColumnType::Inet, max_ip_slice).unwrap();
+        let max_ip_serialize =
+            super::deser_cql_value(&ColumnType::Native(NativeType::Inet), max_ip_slice).unwrap();
         assert_eq!(max_ip_serialize, CqlValue::Inet(max_ip));
     }
 
@@ -1019,12 +1080,14 @@ mod tests {
 
         let float_buf: Vec<u8> = vec![63, 0, 0, 0];
         let float_slice = &mut &float_buf[..];
-        let float_serialize = super::deser_cql_value(&ColumnType::Float, float_slice).unwrap();
+        let float_serialize =
+            super::deser_cql_value(&ColumnType::Native(NativeType::Float), float_slice).unwrap();
         assert_eq!(float_serialize, CqlValue::Float(float));
 
         let double_buf: Vec<u8> = vec![64, 0, 0, 0, 0, 0, 0, 0];
         let double_slice = &mut &double_buf[..];
-        let double_serialize = super::deser_cql_value(&ColumnType::Double, double_slice).unwrap();
+        let double_serialize =
+            super::deser_cql_value(&ColumnType::Native(NativeType::Double), double_slice).unwrap();
         assert_eq!(double_serialize, CqlValue::Double(double));
     }
 
@@ -1085,7 +1148,9 @@ mod tests {
         ];
 
         for t in tests.iter() {
-            let value = super::deser_cql_value(&ColumnType::Varint, &mut &*t.encoding).unwrap();
+            let value =
+                super::deser_cql_value(&ColumnType::Native(NativeType::Varint), &mut &*t.encoding)
+                    .unwrap();
             assert_eq!(CqlValue::Varint(t.value.clone()), value);
         }
     }
@@ -1117,7 +1182,9 @@ mod tests {
         ];
 
         for t in tests.iter() {
-            let value = super::deser_cql_value(&ColumnType::Decimal, &mut &*t.encoding).unwrap();
+            let value =
+                super::deser_cql_value(&ColumnType::Native(NativeType::Decimal), &mut &*t.encoding)
+                    .unwrap();
             assert_eq!(CqlValue::Decimal(t.value.clone()), value);
         }
     }
@@ -1127,7 +1194,8 @@ mod tests {
         let counter: Vec<u8> = vec![0, 0, 0, 0, 0, 0, 1, 0];
         let counter_slice = &mut &counter[..];
         let counter_serialize =
-            super::deser_cql_value(&ColumnType::Counter, counter_slice).unwrap();
+            super::deser_cql_value(&ColumnType::Native(NativeType::Counter), counter_slice)
+                .unwrap();
         assert_eq!(counter_serialize, CqlValue::Counter(Counter(256)));
     }
 
@@ -1135,7 +1203,8 @@ mod tests {
     fn test_deserialize_blob() {
         let blob: Vec<u8> = vec![0, 1, 2, 3];
         let blob_slice = &mut &blob[..];
-        let blob_serialize = super::deser_cql_value(&ColumnType::Blob, blob_slice).unwrap();
+        let blob_serialize =
+            super::deser_cql_value(&ColumnType::Native(NativeType::Blob), blob_slice).unwrap();
         assert_eq!(blob_serialize, CqlValue::Blob(blob));
     }
 
@@ -1143,12 +1212,14 @@ mod tests {
     fn test_deserialize_bool() {
         let bool_buf: Vec<u8> = vec![0x00];
         let bool_slice = &mut &bool_buf[..];
-        let bool_serialize = super::deser_cql_value(&ColumnType::Boolean, bool_slice).unwrap();
+        let bool_serialize =
+            super::deser_cql_value(&ColumnType::Native(NativeType::Boolean), bool_slice).unwrap();
         assert_eq!(bool_serialize, CqlValue::Boolean(false));
 
         let bool_buf: Vec<u8> = vec![0x01];
         let bool_slice = &mut &bool_buf[..];
-        let bool_serialize = super::deser_cql_value(&ColumnType::Boolean, bool_slice).unwrap();
+        let bool_serialize =
+            super::deser_cql_value(&ColumnType::Native(NativeType::Boolean), bool_slice).unwrap();
         assert_eq!(bool_serialize, CqlValue::Boolean(true));
     }
 
@@ -1156,24 +1227,28 @@ mod tests {
     fn test_deserialize_int_types() {
         let int_buf: Vec<u8> = vec![0, 0, 0, 4];
         let int_slice = &mut &int_buf[..];
-        let int_serialized = super::deser_cql_value(&ColumnType::Int, int_slice).unwrap();
+        let int_serialized =
+            super::deser_cql_value(&ColumnType::Native(NativeType::Int), int_slice).unwrap();
         assert_eq!(int_serialized, CqlValue::Int(4));
 
         let smallint_buf: Vec<u8> = vec![0, 4];
         let smallint_slice = &mut &smallint_buf[..];
         let smallint_serialized =
-            super::deser_cql_value(&ColumnType::SmallInt, smallint_slice).unwrap();
+            super::deser_cql_value(&ColumnType::Native(NativeType::SmallInt), smallint_slice)
+                .unwrap();
         assert_eq!(smallint_serialized, CqlValue::SmallInt(4));
 
         let tinyint_buf: Vec<u8> = vec![4];
         let tinyint_slice = &mut &tinyint_buf[..];
         let tinyint_serialized =
-            super::deser_cql_value(&ColumnType::TinyInt, tinyint_slice).unwrap();
+            super::deser_cql_value(&ColumnType::Native(NativeType::TinyInt), tinyint_slice)
+                .unwrap();
         assert_eq!(tinyint_serialized, CqlValue::TinyInt(4));
 
         let bigint_buf: Vec<u8> = vec![0, 0, 0, 0, 0, 0, 0, 4];
         let bigint_slice = &mut &bigint_buf[..];
-        let bigint_serialized = super::deser_cql_value(&ColumnType::BigInt, bigint_slice).unwrap();
+        let bigint_serialized =
+            super::deser_cql_value(&ColumnType::Native(NativeType::BigInt), bigint_slice).unwrap();
         assert_eq!(bigint_serialized, CqlValue::BigInt(4));
     }
 
@@ -1262,37 +1337,42 @@ mod tests {
 
     #[test]
     fn test_deserialize_date() {
+        use NativeType::Date;
         // Date is correctly parsed from a 4 byte array
         let four_bytes: [u8; 4] = [12, 23, 34, 45];
         let date: CqlValue =
-            super::deser_cql_value(&ColumnType::Date, &mut four_bytes.as_ref()).unwrap();
+            super::deser_cql_value(&ColumnType::Native(Date), &mut four_bytes.as_ref()).unwrap();
         assert_eq!(
             date,
             CqlValue::Date(CqlDate(u32::from_be_bytes(four_bytes)))
         );
 
         // Date is parsed as u32 not i32, u32::MAX is u32::MAX
-        let date: CqlValue =
-            super::deser_cql_value(&ColumnType::Date, &mut u32::MAX.to_be_bytes().as_ref())
-                .unwrap();
+        let date: CqlValue = super::deser_cql_value(
+            &ColumnType::Native(Date),
+            &mut u32::MAX.to_be_bytes().as_ref(),
+        )
+        .unwrap();
         assert_eq!(date, CqlValue::Date(CqlDate(u32::MAX)));
 
         // Trying to parse a 0, 3 or 5 byte array fails
-        super::deser_cql_value(&ColumnType::Date, &mut [].as_ref()).unwrap();
-        super::deser_cql_value(&ColumnType::Date, &mut [1, 2, 3].as_ref()).unwrap_err();
-        super::deser_cql_value(&ColumnType::Date, &mut [1, 2, 3, 4, 5].as_ref()).unwrap_err();
+        super::deser_cql_value(&ColumnType::Native(Date), &mut [].as_ref()).unwrap();
+        super::deser_cql_value(&ColumnType::Native(Date), &mut [1, 2, 3].as_ref()).unwrap_err();
+        super::deser_cql_value(&ColumnType::Native(Date), &mut [1, 2, 3, 4, 5].as_ref())
+            .unwrap_err();
 
         // Deserialize unix epoch
         let unix_epoch_bytes = 2_u32.pow(31).to_be_bytes();
 
         let date =
-            super::deser_cql_value(&ColumnType::Date, &mut unix_epoch_bytes.as_ref()).unwrap();
+            super::deser_cql_value(&ColumnType::Native(Date), &mut unix_epoch_bytes.as_ref())
+                .unwrap();
         assert_eq!(date.as_cql_date(), Some(CqlDate(1 << 31)));
 
         // 2^31 - 30 when converted to NaiveDate is 1969-12-02
         let before_epoch = CqlDate((1 << 31) - 30);
         let date: CqlValue = super::deser_cql_value(
-            &ColumnType::Date,
+            &ColumnType::Native(Date),
             &mut ((1_u32 << 31) - 30).to_be_bytes().as_ref(),
         )
         .unwrap();
@@ -1302,7 +1382,7 @@ mod tests {
         // 2^31 + 30 when converted to NaiveDate is 1970-01-31
         let after_epoch = CqlDate((1 << 31) + 30);
         let date = super::deser_cql_value(
-            &ColumnType::Date,
+            &ColumnType::Native(Date),
             &mut ((1_u32 << 31) + 30).to_be_bytes().as_ref(),
         )
         .unwrap();
@@ -1311,14 +1391,20 @@ mod tests {
 
         // Min date
         let min_date = CqlDate(u32::MIN);
-        let date = super::deser_cql_value(&ColumnType::Date, &mut u32::MIN.to_be_bytes().as_ref())
-            .unwrap();
+        let date = super::deser_cql_value(
+            &ColumnType::Native(Date),
+            &mut u32::MIN.to_be_bytes().as_ref(),
+        )
+        .unwrap();
         assert_eq!(date.as_cql_date(), Some(min_date));
 
         // Max date
         let max_date = CqlDate(u32::MAX);
-        let date = super::deser_cql_value(&ColumnType::Date, &mut u32::MAX.to_be_bytes().as_ref())
-            .unwrap();
+        let date = super::deser_cql_value(
+            &ColumnType::Native(Date),
+            &mut u32::MAX.to_be_bytes().as_ref(),
+        )
+        .unwrap();
         assert_eq!(date.as_cql_date(), Some(max_date));
     }
 
@@ -1326,19 +1412,22 @@ mod tests {
     #[test]
     fn test_naive_date_from_cql() {
         use chrono::NaiveDate;
+        use NativeType::Date;
 
         // 2^31 when converted to NaiveDate is 1970-01-01
         let unix_epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
-        let date =
-            super::deser_cql_value(&ColumnType::Date, &mut (1u32 << 31).to_be_bytes().as_ref())
-                .unwrap();
+        let date = super::deser_cql_value(
+            &ColumnType::Native(Date),
+            &mut (1u32 << 31).to_be_bytes().as_ref(),
+        )
+        .unwrap();
 
         assert_eq!(date.as_naive_date(), Some(unix_epoch));
 
         // 2^31 - 30 when converted to NaiveDate is 1969-12-02
         let before_epoch = NaiveDate::from_ymd_opt(1969, 12, 2).unwrap();
         let date = super::deser_cql_value(
-            &ColumnType::Date,
+            &ColumnType::Native(Date),
             &mut ((1u32 << 31) - 30).to_be_bytes().as_ref(),
         )
         .unwrap();
@@ -1348,7 +1437,7 @@ mod tests {
         // 2^31 + 30 when converted to NaiveDate is 1970-01-31
         let after_epoch = NaiveDate::from_ymd_opt(1970, 1, 31).unwrap();
         let date = super::deser_cql_value(
-            &ColumnType::Date,
+            &ColumnType::Native(Date),
             &mut ((1u32 << 31) + 30).to_be_bytes().as_ref(),
         )
         .unwrap();
@@ -1357,16 +1446,19 @@ mod tests {
 
         // 0 and u32::MAX are out of NaiveDate range, fails with an error, not panics
         assert_eq!(
-            super::deser_cql_value(&ColumnType::Date, &mut 0_u32.to_be_bytes().as_ref())
+            super::deser_cql_value(&ColumnType::Native(Date), &mut 0_u32.to_be_bytes().as_ref())
                 .unwrap()
                 .as_naive_date(),
             None
         );
 
         assert_eq!(
-            super::deser_cql_value(&ColumnType::Date, &mut u32::MAX.to_be_bytes().as_ref())
-                .unwrap()
-                .as_naive_date(),
+            super::deser_cql_value(
+                &ColumnType::Native(NativeType::Date),
+                &mut u32::MAX.to_be_bytes().as_ref()
+            )
+            .unwrap()
+            .as_naive_date(),
             None
         );
     }
@@ -1379,16 +1471,18 @@ mod tests {
 
         // 2^31 when converted to time::Date is 1970-01-01
         let unix_epoch = Date::from_calendar_date(1970, January, 1).unwrap();
-        let date =
-            super::deser_cql_value(&ColumnType::Date, &mut (1u32 << 31).to_be_bytes().as_ref())
-                .unwrap();
+        let date = super::deser_cql_value(
+            &ColumnType::Native(NativeType::Date),
+            &mut (1u32 << 31).to_be_bytes().as_ref(),
+        )
+        .unwrap();
 
         assert_eq!(date.as_date(), Some(unix_epoch));
 
         // 2^31 - 30 when converted to time::Date is 1969-12-02
         let before_epoch = Date::from_calendar_date(1969, December, 2).unwrap();
         let date = super::deser_cql_value(
-            &ColumnType::Date,
+            &ColumnType::Native(NativeType::Date),
             &mut ((1u32 << 31) - 30).to_be_bytes().as_ref(),
         )
         .unwrap();
@@ -1398,7 +1492,7 @@ mod tests {
         // 2^31 + 30 when converted to time::Date is 1970-01-31
         let after_epoch = Date::from_calendar_date(1970, January, 31).unwrap();
         let date = super::deser_cql_value(
-            &ColumnType::Date,
+            &ColumnType::Native(NativeType::Date),
             &mut ((1u32 << 31) + 30).to_be_bytes().as_ref(),
         )
         .unwrap();
@@ -1407,16 +1501,22 @@ mod tests {
 
         // 0 and u32::MAX are out of NaiveDate range, fails with an error, not panics
         assert_eq!(
-            super::deser_cql_value(&ColumnType::Date, &mut 0_u32.to_be_bytes().as_ref())
-                .unwrap()
-                .as_date(),
+            super::deser_cql_value(
+                &ColumnType::Native(NativeType::Date),
+                &mut 0_u32.to_be_bytes().as_ref()
+            )
+            .unwrap()
+            .as_date(),
             None
         );
 
         assert_eq!(
-            super::deser_cql_value(&ColumnType::Date, &mut u32::MAX.to_be_bytes().as_ref())
-                .unwrap()
-                .as_date(),
+            super::deser_cql_value(
+                &ColumnType::Native(NativeType::Date),
+                &mut u32::MAX.to_be_bytes().as_ref()
+            )
+            .unwrap()
+            .as_date(),
             None
         );
     }
@@ -1433,7 +1533,8 @@ mod tests {
         for test_val in [0, 1, 18463, max_time].iter() {
             let bytes: [u8; 8] = test_val.to_be_bytes();
             let cql_value: CqlValue =
-                super::deser_cql_value(&ColumnType::Time, &mut &bytes[..]).unwrap();
+                super::deser_cql_value(&ColumnType::Native(NativeType::Time), &mut &bytes[..])
+                    .unwrap();
             assert_eq!(cql_value, CqlValue::Time(CqlTime(*test_val)));
         }
 
@@ -1441,7 +1542,8 @@ mod tests {
         // Values bigger than 86399999999999 cause an error
         for test_val in [-1, i64::MIN, max_time + 1, i64::MAX].iter() {
             let bytes: [u8; 8] = test_val.to_be_bytes();
-            super::deser_cql_value(&ColumnType::Time, &mut &bytes[..]).unwrap_err();
+            super::deser_cql_value(&ColumnType::Native(NativeType::Time), &mut &bytes[..])
+                .unwrap_err();
         }
     }
 
@@ -1452,8 +1554,11 @@ mod tests {
 
         // 0 when converted to NaiveTime is 0:0:0.0
         let midnight = NaiveTime::from_hms_nano_opt(0, 0, 0, 0).unwrap();
-        let time =
-            super::deser_cql_value(&ColumnType::Time, &mut (0i64).to_be_bytes().as_ref()).unwrap();
+        let time = super::deser_cql_value(
+            &ColumnType::Native(NativeType::Time),
+            &mut (0i64).to_be_bytes().as_ref(),
+        )
+        .unwrap();
 
         assert_eq!(time.as_naive_time(), Some(midnight));
 
@@ -1461,7 +1566,7 @@ mod tests {
         let (h, m, s, n) = (10, 10, 30, 500_000_001);
         let midnight = NaiveTime::from_hms_nano_opt(h, m, s, n).unwrap();
         let time = super::deser_cql_value(
-            &ColumnType::Time,
+            &ColumnType::Native(NativeType::Time),
             &mut ((h as i64 * 3600 + m as i64 * 60 + s as i64) * 1_000_000_000 + n as i64)
                 .to_be_bytes()
                 .as_ref(),
@@ -1474,7 +1579,7 @@ mod tests {
         let (h, m, s, n) = (23, 59, 59, 999_999_999);
         let midnight = NaiveTime::from_hms_nano_opt(h, m, s, n).unwrap();
         let time = super::deser_cql_value(
-            &ColumnType::Time,
+            &ColumnType::Native(NativeType::Time),
             &mut ((h as i64 * 3600 + m as i64 * 60 + s as i64) * 1_000_000_000 + n as i64)
                 .to_be_bytes()
                 .as_ref(),
@@ -1491,8 +1596,11 @@ mod tests {
 
         // 0 when converted to NaiveTime is 0:0:0.0
         let midnight = Time::from_hms_nano(0, 0, 0, 0).unwrap();
-        let time =
-            super::deser_cql_value(&ColumnType::Time, &mut (0i64).to_be_bytes().as_ref()).unwrap();
+        let time = super::deser_cql_value(
+            &ColumnType::Native(NativeType::Time),
+            &mut (0i64).to_be_bytes().as_ref(),
+        )
+        .unwrap();
 
         dbg!(&time);
         assert_eq!(time.as_time(), Some(midnight));
@@ -1501,7 +1609,7 @@ mod tests {
         let (h, m, s, n) = (10, 10, 30, 500_000_001);
         let midnight = Time::from_hms_nano(h, m, s, n).unwrap();
         let time = super::deser_cql_value(
-            &ColumnType::Time,
+            &ColumnType::Native(NativeType::Time),
             &mut ((h as i64 * 3600 + m as i64 * 60 + s as i64) * 1_000_000_000 + n as i64)
                 .to_be_bytes()
                 .as_ref(),
@@ -1514,7 +1622,7 @@ mod tests {
         let (h, m, s, n) = (23, 59, 59, 999_999_999);
         let midnight = Time::from_hms_nano(h, m, s, n).unwrap();
         let time = super::deser_cql_value(
-            &ColumnType::Time,
+            &ColumnType::Native(NativeType::Time),
             &mut ((h as i64 * 3600 + m as i64 * 60 + s as i64) * 1_000_000_000 + n as i64)
                 .to_be_bytes()
                 .as_ref(),
@@ -1532,7 +1640,8 @@ mod tests {
         for test_val in &[0, -1, 1, 74568745, -4584658, i64::MIN, i64::MAX] {
             let bytes: [u8; 8] = test_val.to_be_bytes();
             let cql_value: CqlValue =
-                super::deser_cql_value(&ColumnType::Timestamp, &mut &bytes[..]).unwrap();
+                super::deser_cql_value(&ColumnType::Native(NativeType::Timestamp), &mut &bytes[..])
+                    .unwrap();
             assert_eq!(cql_value, CqlValue::Timestamp(CqlTimestamp(*test_val)));
         }
     }
@@ -1544,8 +1653,11 @@ mod tests {
 
         // 0 when converted to DateTime is 1970-01-01 0:00:00.00
         let unix_epoch = NaiveDateTime::from_timestamp_opt(0, 0).unwrap().and_utc();
-        let date = super::deser_cql_value(&ColumnType::Timestamp, &mut 0i64.to_be_bytes().as_ref())
-            .unwrap();
+        let date = super::deser_cql_value(
+            &ColumnType::Native(NativeType::Timestamp),
+            &mut 0i64.to_be_bytes().as_ref(),
+        )
+        .unwrap();
 
         assert_eq!(date.as_datetime(), Some(unix_epoch));
 
@@ -1557,7 +1669,7 @@ mod tests {
         )
         .and_utc();
         let date = super::deser_cql_value(
-            &ColumnType::Timestamp,
+            &ColumnType::Native(NativeType::Timestamp),
             &mut timestamp.to_be_bytes().as_ref(),
         )
         .unwrap();
@@ -1572,7 +1684,7 @@ mod tests {
         )
         .and_utc();
         let date = super::deser_cql_value(
-            &ColumnType::Timestamp,
+            &ColumnType::Native(NativeType::Timestamp),
             &mut timestamp.to_be_bytes().as_ref(),
         )
         .unwrap();
@@ -1581,16 +1693,22 @@ mod tests {
 
         // 0 and u32::MAX are out of NaiveDate range, fails with an error, not panics
         assert_eq!(
-            super::deser_cql_value(&ColumnType::Timestamp, &mut i64::MIN.to_be_bytes().as_ref())
-                .unwrap()
-                .as_datetime(),
+            super::deser_cql_value(
+                &ColumnType::Native(NativeType::Timestamp),
+                &mut i64::MIN.to_be_bytes().as_ref()
+            )
+            .unwrap()
+            .as_datetime(),
             None
         );
 
         assert_eq!(
-            super::deser_cql_value(&ColumnType::Timestamp, &mut i64::MAX.to_be_bytes().as_ref())
-                .unwrap()
-                .as_datetime(),
+            super::deser_cql_value(
+                &ColumnType::Native(NativeType::Timestamp),
+                &mut i64::MAX.to_be_bytes().as_ref()
+            )
+            .unwrap()
+            .as_datetime(),
             None
         );
     }
@@ -1602,8 +1720,11 @@ mod tests {
 
         // 0 when converted to OffsetDateTime is 1970-01-01 0:00:00.00
         let unix_epoch = OffsetDateTime::from_unix_timestamp(0).unwrap();
-        let date = super::deser_cql_value(&ColumnType::Timestamp, &mut 0i64.to_be_bytes().as_ref())
-            .unwrap();
+        let date = super::deser_cql_value(
+            &ColumnType::Native(NativeType::Timestamp),
+            &mut 0i64.to_be_bytes().as_ref(),
+        )
+        .unwrap();
 
         assert_eq!(date.as_offset_date_time(), Some(unix_epoch));
 
@@ -1615,7 +1736,7 @@ mod tests {
         )
         .assume_utc();
         let date = super::deser_cql_value(
-            &ColumnType::Timestamp,
+            &ColumnType::Native(NativeType::Timestamp),
             &mut timestamp.to_be_bytes().as_ref(),
         )
         .unwrap();
@@ -1630,7 +1751,7 @@ mod tests {
         )
         .assume_utc();
         let date = super::deser_cql_value(
-            &ColumnType::Timestamp,
+            &ColumnType::Native(NativeType::Timestamp),
             &mut timestamp.to_be_bytes().as_ref(),
         )
         .unwrap();
@@ -1639,16 +1760,22 @@ mod tests {
 
         // 0 and u32::MAX are out of NaiveDate range, fails with an error, not panics
         assert_eq!(
-            super::deser_cql_value(&ColumnType::Timestamp, &mut i64::MIN.to_be_bytes().as_ref())
-                .unwrap()
-                .as_offset_date_time(),
+            super::deser_cql_value(
+                &ColumnType::Native(NativeType::Timestamp),
+                &mut i64::MIN.to_be_bytes().as_ref()
+            )
+            .unwrap()
+            .as_offset_date_time(),
             None
         );
 
         assert_eq!(
-            super::deser_cql_value(&ColumnType::Timestamp, &mut i64::MAX.to_be_bytes().as_ref())
-                .unwrap()
-                .as_offset_date_time(),
+            super::deser_cql_value(
+                &ColumnType::Native(NativeType::Timestamp),
+                &mut i64::MAX.to_be_bytes().as_ref()
+            )
+            .unwrap()
+            .as_offset_date_time(),
             None
         );
     }
@@ -1668,7 +1795,8 @@ mod tests {
     fn test_duration_deserialize() {
         let bytes = [0xc, 0x12, 0xe2, 0x8c, 0x39, 0xd2];
         let cql_value: CqlValue =
-            super::deser_cql_value(&ColumnType::Duration, &mut &bytes[..]).unwrap();
+            super::deser_cql_value(&ColumnType::Native(NativeType::Duration), &mut &bytes[..])
+                .unwrap();
         assert_eq!(
             cql_value,
             CqlValue::Duration(CqlDuration {
@@ -1681,41 +1809,64 @@ mod tests {
 
     #[test]
     fn test_deserialize_empty_payload() {
+        use CollectionType::*;
+        use NativeType::*;
         for (test_type, res_cql) in [
-            (ColumnType::Ascii, CqlValue::Ascii("".to_owned())),
-            (ColumnType::Boolean, CqlValue::Empty),
-            (ColumnType::Blob, CqlValue::Blob(vec![])),
-            (ColumnType::Counter, CqlValue::Empty),
-            (ColumnType::Date, CqlValue::Empty),
-            (ColumnType::Decimal, CqlValue::Empty),
-            (ColumnType::Double, CqlValue::Empty),
-            (ColumnType::Float, CqlValue::Empty),
-            (ColumnType::Int, CqlValue::Empty),
-            (ColumnType::BigInt, CqlValue::Empty),
-            (ColumnType::Text, CqlValue::Text("".to_owned())),
-            (ColumnType::Timestamp, CqlValue::Empty),
-            (ColumnType::Inet, CqlValue::Empty),
-            (ColumnType::List(Box::new(ColumnType::Int)), CqlValue::Empty),
+            (ColumnType::Native(Ascii), CqlValue::Ascii("".to_owned())),
+            (ColumnType::Native(Boolean), CqlValue::Empty),
+            (ColumnType::Native(Blob), CqlValue::Blob(vec![])),
+            (ColumnType::Native(Counter), CqlValue::Empty),
+            (ColumnType::Native(Date), CqlValue::Empty),
+            (ColumnType::Native(Decimal), CqlValue::Empty),
+            (ColumnType::Native(Double), CqlValue::Empty),
+            (ColumnType::Native(Float), CqlValue::Empty),
+            (ColumnType::Native(Int), CqlValue::Empty),
+            (ColumnType::Native(BigInt), CqlValue::Empty),
+            (ColumnType::Native(Text), CqlValue::Text("".to_owned())),
+            (ColumnType::Native(Timestamp), CqlValue::Empty),
+            (ColumnType::Native(Inet), CqlValue::Empty),
             (
-                ColumnType::Map(Box::new(ColumnType::Int), Box::new(ColumnType::Int)),
-                CqlValue::Empty,
-            ),
-            (ColumnType::Set(Box::new(ColumnType::Int)), CqlValue::Empty),
-            (
-                ColumnType::UserDefinedType {
-                    type_name: "".to_owned(),
-                    keyspace: "".to_owned(),
-                    field_types: vec![],
+                ColumnType::Collection {
+                    frozen: (),
+                    type_: List(Box::new(ColumnType::Native(Int))),
                 },
                 CqlValue::Empty,
             ),
-            (ColumnType::SmallInt, CqlValue::Empty),
-            (ColumnType::TinyInt, CqlValue::Empty),
-            (ColumnType::Time, CqlValue::Empty),
-            (ColumnType::Timeuuid, CqlValue::Empty),
+            (
+                ColumnType::Collection {
+                    frozen: (),
+                    type_: Map(
+                        Box::new(ColumnType::Native(Int)),
+                        Box::new(ColumnType::Native(Int)),
+                    ),
+                },
+                CqlValue::Empty,
+            ),
+            (
+                ColumnType::Collection {
+                    frozen: (),
+                    type_: Set(Box::new(ColumnType::Native(Int))),
+                },
+                CqlValue::Empty,
+            ),
+            (
+                ColumnType::UserDefinedType {
+                    frozen: (),
+                    definition: Ok(Arc::new(UserDefinedType {
+                        type_name: "".to_owned(),
+                        keyspace: "".to_owned(),
+                        field_types: vec![],
+                    })),
+                },
+                CqlValue::Empty,
+            ),
+            (ColumnType::Native(SmallInt), CqlValue::Empty),
+            (ColumnType::Native(TinyInt), CqlValue::Empty),
+            (ColumnType::Native(Time), CqlValue::Empty),
+            (ColumnType::Native(Timeuuid), CqlValue::Empty),
             (ColumnType::Tuple(vec![]), CqlValue::Empty),
-            (ColumnType::Uuid, CqlValue::Empty),
-            (ColumnType::Varint, CqlValue::Empty),
+            (ColumnType::Native(Uuid), CqlValue::Empty),
+            (ColumnType::Native(Varint), CqlValue::Empty),
         ] {
             let cql_value: CqlValue = super::deser_cql_value(&test_type, &mut &[][..]).unwrap();
 
@@ -1748,8 +1899,11 @@ mod tests {
         ];
 
         for (uuid_str, uuid_bytes) in &tests {
-            let cql_val: CqlValue =
-                super::deser_cql_value(&ColumnType::Timeuuid, &mut &uuid_bytes[..]).unwrap();
+            let cql_val: CqlValue = super::deser_cql_value(
+                &ColumnType::Native(NativeType::Timeuuid),
+                &mut &uuid_bytes[..],
+            )
+            .unwrap();
 
             match cql_val {
                 CqlValue::Timeuuid(uuid) => {

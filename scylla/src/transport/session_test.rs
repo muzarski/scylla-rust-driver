@@ -238,7 +238,11 @@ async fn test_prepared_statement() {
             .hash_one(&prepared_statement.compute_partition_key(&values).unwrap());
         assert_eq!(token, prepared_token);
         let mut pk = SerializedValues::new();
-        pk.add_value(&17_i32, &ColumnType::Int).unwrap();
+        pk.add_value(
+            &17_i32,
+            &ColumnType::Native(scylla_cql::frame::response::result::NativeType::Int),
+        )
+        .unwrap();
         let cluster_data_token = session
             .get_cluster_data()
             .compute_token(&ks, "t2", &pk)
@@ -2822,7 +2826,10 @@ async fn test_manual_primary_key_computation() {
 
         let mut pk_values_in_pk_order = SerializedValues::new();
         pk_values_in_pk_order
-            .add_value(&17_i32, &ColumnType::Int)
+            .add_value(
+                &17_i32,
+                &ColumnType::Native(scylla_cql::frame::response::result::NativeType::Int),
+            )
             .unwrap();
         let all_values_in_query_order = (17_i32, 16_i32, "I'm prepared!!!");
 
@@ -2851,13 +2858,22 @@ async fn test_manual_primary_key_computation() {
 
         let mut pk_values_in_pk_order = SerializedValues::new();
         pk_values_in_pk_order
-            .add_value(&17_i32, &ColumnType::Int)
+            .add_value(
+                &17_i32,
+                &ColumnType::Native(scylla_cql::frame::response::result::NativeType::Int),
+            )
             .unwrap();
         pk_values_in_pk_order
-            .add_value(&16_i32, &ColumnType::Int)
+            .add_value(
+                &16_i32,
+                &ColumnType::Native(scylla_cql::frame::response::result::NativeType::Int),
+            )
             .unwrap();
         pk_values_in_pk_order
-            .add_value(&"I'm prepared!!!", &ColumnType::Ascii)
+            .add_value(
+                &"I'm prepared!!!",
+                &ColumnType::Native(scylla_cql::frame::response::result::NativeType::Ascii),
+            )
             .unwrap();
         let all_values_in_query_order = (17_i32, "I'm prepared!!!", 16_i32);
 

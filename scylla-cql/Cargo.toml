@@ -26,6 +26,8 @@ lz4_flex = { version = "0.11.1" }
 async-trait = "0.1.57"
 serde = { version = "1.0", features = ["derive"], optional = true }
 time = { version = "0.3", optional = true }
+strum = "0.23"
+strum_macros = "0.23"
 
 [dev-dependencies]
 criterion = "0.4" # Note: v0.5 needs at least rust 1.70.0

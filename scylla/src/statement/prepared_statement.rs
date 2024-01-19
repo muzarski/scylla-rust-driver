@@ -530,21 +530,44 @@ mod tests {
     fn test_partition_key_multiple_columns_shuffled() {
         let meta = make_meta(
             [
-                ColumnType::TinyInt,
-                ColumnType::SmallInt,
-                ColumnType::Int,
-                ColumnType::BigInt,
-                ColumnType::Blob,
+                ColumnType::Native(scylla_cql::frame::response::result::NativeType::TinyInt),
+                ColumnType::Native(scylla_cql::frame::response::result::NativeType::SmallInt),
+                ColumnType::Native(scylla_cql::frame::response::result::NativeType::Int),
+                ColumnType::Native(scylla_cql::frame::response::result::NativeType::BigInt),
+                ColumnType::Native(scylla_cql::frame::response::result::NativeType::Blob),
             ],
             [4, 0, 3],
         );
         let mut values = SerializedValues::new();
-        values.add_value(&67i8, &ColumnType::TinyInt).unwrap();
-        values.add_value(&42i16, &ColumnType::SmallInt).unwrap();
-        values.add_value(&23i32, &ColumnType::Int).unwrap();
-        values.add_value(&89i64, &ColumnType::BigInt).unwrap();
         values
-            .add_value(&[1u8, 2, 3, 4, 5], &ColumnType::Blob)
+            .add_value(
+                &67i8,
+                &ColumnType::Native(scylla_cql::frame::response::result::NativeType::TinyInt),
+            )
+            .unwrap();
+        values
+            .add_value(
+                &42i16,
+                &ColumnType::Native(scylla_cql::frame::response::result::NativeType::SmallInt),
+            )
+            .unwrap();
+        values
+            .add_value(
+                &23i32,
+                &ColumnType::Native(scylla_cql::frame::response::result::NativeType::Int),
+            )
+            .unwrap();
+        values
+            .add_value(
+                &89i64,
+                &ColumnType::Native(scylla_cql::frame::response::result::NativeType::BigInt),
+            )
+            .unwrap();
+        values
+            .add_value(
+                &[1u8, 2, 3, 4, 5],
+                &ColumnType::Native(scylla_cql::frame::response::result::NativeType::Blob),
+            )
             .unwrap();
 
         let pk = PartitionKey::new(&meta, &values).unwrap();
