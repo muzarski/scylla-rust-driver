@@ -14,7 +14,9 @@ use futures::Stream;
 use rand::seq::SliceRandom;
 use rand::{thread_rng, Rng};
 use scylla_cql::errors::NewSessionError;
-use scylla_cql::frame::response::result::Row;
+use scylla_cql::frame::response::result::{
+    CollectionType, CqlType, NativeType, Row, UserDefinedType,
+};
 use scylla_macros::FromRow;
 use std::borrow::BorrowMut;
 use std::cell::Cell;
@@ -154,7 +156,7 @@ pub struct Keyspace {
     /// Empty HashMap may as well mean that the client disabled schema fetching in SessionConfig
     pub views: HashMap<String, MaterializedView>,
     /// Empty HashMap may as well mean that the client disabled schema fetching in SessionConfig
-    pub user_defined_types: HashMap<String, Arc<UserDefinedType>>,
+    pub user_defined_types: HashMap<String, Arc<UserDefinedType<bool, MissingUserDefinedType>>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -173,7 +175,7 @@ pub struct MaterializedView {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Column {
-    pub type_: CqlType,
+    pub type_: CqlType<bool, MissingUserDefinedType>,
     pub kind: ColumnKind,
 }
 
@@ -195,8 +197,8 @@ impl PreCqlType {
     pub(crate) fn into_cql_type(
         self,
         keyspace_name: &String,
-        udts: &HashMap<String, HashMap<String, Arc<UserDefinedType>>>,
-    ) -> CqlType {
+        udts: &HashMap<String, HashMap<String, Arc<UserDefinedType<bool, MissingUserDefinedType>>>>,
+    ) -> CqlType<bool, MissingUserDefinedType> {
         match self {
             PreCqlType::Native(n) => CqlType::Native(n),
             PreCqlType::Collection { frozen, type_ } => CqlType::Collection {
@@ -225,59 +227,11 @@ impl PreCqlType {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CqlType {
-    Native(NativeType),
-    Collection {
-        frozen: bool,
-        type_: CollectionType,
-    },
-    Tuple(Vec<CqlType>),
-    UserDefinedType {
-        frozen: bool,
-        // Using Arc here in order not to have many copies of the same definition
-        definition: Result<Arc<UserDefinedType>, MissingUserDefinedType>,
-    },
-}
-
-/// Definition of a user-defined type
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct UserDefinedType {
-    pub name: String,
-    pub keyspace: String,
-    pub field_types: Vec<(String, CqlType)>,
-}
-
 /// Represents a user defined type whose definition is missing from the metadata.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MissingUserDefinedType {
     pub name: String,
     pub keyspace: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, EnumString)]
-#[strum(serialize_all = "lowercase")]
-pub enum NativeType {
-    Ascii,
-    Boolean,
-    Blob,
-    Counter,
-    Date,
-    Decimal,
-    Double,
-    Duration,
-    Float,
-    Int,
-    BigInt,
-    Text,
-    Timestamp,
-    Inet,
-    SmallInt,
-    TinyInt,
-    Time,
-    Timeuuid,
-    Uuid,
-    Varint,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -291,8 +245,8 @@ impl PreCollectionType {
     pub(crate) fn into_collection_type(
         self,
         keyspace_name: &String,
-        udts: &HashMap<String, HashMap<String, Arc<UserDefinedType>>>,
-    ) -> CollectionType {
+        udts: &HashMap<String, HashMap<String, Arc<UserDefinedType<bool, MissingUserDefinedType>>>>,
+    ) -> CollectionType<bool, MissingUserDefinedType> {
         match self {
             PreCollectionType::List(t) => {
                 CollectionType::List(Box::new(t.into_cql_type(keyspace_name, udts)))
@@ -306,13 +260,6 @@ impl PreCollectionType {
             }
         }
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CollectionType {
-    List(Box<CqlType>),
-    Map(Box<CqlType>, Box<CqlType>),
-    Set(Box<CqlType>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, EnumString)]
@@ -971,7 +918,10 @@ impl TryFrom<UdtRow> for UdtRowWithParsedFieldTypes {
 async fn query_user_defined_types(
     conn: &Arc<Connection>,
     keyspaces_to_fetch: &[String],
-) -> Result<HashMap<String, HashMap<String, Arc<UserDefinedType>>>, QueryError> {
+) -> Result<
+    HashMap<String, HashMap<String, Arc<UserDefinedType<bool, MissingUserDefinedType>>>>,
+    QueryError,
+> {
     let rows = query_filter_keyspace_name(
         conn,
         "select keyspace_name, type_name, field_names, field_types from system_schema.types",
@@ -1019,7 +969,7 @@ async fn query_user_defined_types(
         }
 
         let udt = Arc::new(UserDefinedType {
-            name: type_name.clone(),
+            type_name: type_name.clone(),
             keyspace: keyspace_name.clone(),
             field_types: fields,
         });
@@ -1291,7 +1241,7 @@ mod toposort_tests {
 async fn query_tables(
     conn: &Arc<Connection>,
     keyspaces_to_fetch: &[String],
-    udts: &HashMap<String, HashMap<String, Arc<UserDefinedType>>>,
+    udts: &HashMap<String, HashMap<String, Arc<UserDefinedType<bool, MissingUserDefinedType>>>>,
 ) -> Result<HashMap<String, HashMap<String, Table>>, QueryError> {
     let rows = query_filter_keyspace_name(
         conn,
@@ -1332,7 +1282,7 @@ async fn query_tables(
 async fn query_views(
     conn: &Arc<Connection>,
     keyspaces_to_fetch: &[String],
-    udts: &HashMap<String, HashMap<String, Arc<UserDefinedType>>>,
+    udts: &HashMap<String, HashMap<String, Arc<UserDefinedType<bool, MissingUserDefinedType>>>>,
 ) -> Result<HashMap<String, HashMap<String, MaterializedView>>, QueryError> {
     let rows = query_filter_keyspace_name(
         conn,
@@ -1378,7 +1328,7 @@ async fn query_views(
 async fn query_tables_schema(
     conn: &Arc<Connection>,
     keyspaces_to_fetch: &[String],
-    udts: &HashMap<String, HashMap<String, Arc<UserDefinedType>>>,
+    udts: &HashMap<String, HashMap<String, Arc<UserDefinedType<bool, MissingUserDefinedType>>>>,
 ) -> Result<HashMap<(String, String), Table>, QueryError> {
     // Upon migration from thrift to CQL, Cassandra internally creates a surrogate column "value" of
     // type EmptyType for dense tables. This resolves into this CQL type name.

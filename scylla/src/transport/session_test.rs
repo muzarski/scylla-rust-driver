@@ -12,10 +12,8 @@ use crate::transport::errors::{BadKeyspaceName, BadQuery, DbError, QueryError};
 use crate::transport::partitioner::{
     calculate_token_for_partition_key, Murmur3Partitioner, Partitioner, PartitionerName,
 };
+use crate::transport::topology::ColumnKind;
 use crate::transport::topology::Strategy::NetworkTopologyStrategy;
-use crate::transport::topology::{
-    CollectionType, ColumnKind, CqlType, NativeType, UserDefinedType,
-};
 use crate::utils::test_utils::{
     create_new_session_builder, supports_feature, unique_keyspace_name,
 };
@@ -27,7 +25,9 @@ use assert_matches::assert_matches;
 use bytes::Bytes;
 use futures::{FutureExt, StreamExt, TryStreamExt};
 use itertools::Itertools;
-use scylla_cql::frame::response::result::ColumnType;
+use scylla_cql::frame::response::result::{
+    CollectionType, ColumnType, CqlType, NativeType, UserDefinedType,
+};
 use scylla_cql::types::serialize::row::{SerializeRow, SerializedValues};
 use scylla_cql::types::serialize::value::SerializeCql;
 use std::collections::BTreeSet;
@@ -36,6 +36,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use uuid::Uuid;
+
+use super::topology::MissingUserDefinedType;
 
 #[tokio::test]
 async fn test_connection_failure() {
@@ -1312,9 +1314,9 @@ async fn test_prepared_config() {
     assert_eq!(prepared_statement.get_page_size(), Some(42));
 }
 
-fn udt_type_a_def(ks: &str) -> Arc<UserDefinedType> {
+fn udt_type_a_def(ks: &str) -> Arc<UserDefinedType<bool, MissingUserDefinedType>> {
     Arc::new(UserDefinedType {
-        name: "type_a".to_string(),
+        type_name: "type_a".to_string(),
         keyspace: ks.to_owned(),
         field_types: vec![
             (
@@ -1350,9 +1352,9 @@ fn udt_type_a_def(ks: &str) -> Arc<UserDefinedType> {
     })
 }
 
-fn udt_type_b_def(ks: &str) -> Arc<UserDefinedType> {
+fn udt_type_b_def(ks: &str) -> Arc<UserDefinedType<bool, MissingUserDefinedType>> {
     Arc::new(UserDefinedType {
-        name: "type_b".to_string(),
+        type_name: "type_b".to_string(),
         keyspace: ks.to_owned(),
         field_types: vec![
             ("a".to_string(), CqlType::Native(NativeType::Int)),
@@ -1361,9 +1363,9 @@ fn udt_type_b_def(ks: &str) -> Arc<UserDefinedType> {
     })
 }
 
-fn udt_type_c_def(ks: &str) -> Arc<UserDefinedType> {
+fn udt_type_c_def(ks: &str) -> Arc<UserDefinedType<bool, MissingUserDefinedType>> {
     Arc::new(UserDefinedType {
-        name: "type_c".to_string(),
+        type_name: "type_c".to_string(),
         keyspace: ks.to_owned(),
         field_types: vec![(
             "a".to_string(),
@@ -2360,7 +2362,7 @@ async fn test_refresh_metadata_after_schema_agreement() {
         udt.unwrap(),
         &Arc::new(UserDefinedType {
             keyspace: ks,
-            name: "udt".to_string(),
+            type_name: "udt".to_string(),
             field_types: Vec::from([
                 ("field1".to_string(), CqlType::Native(NativeType::Int)),
                 ("field2".to_string(), CqlType::Native(NativeType::Uuid)),
