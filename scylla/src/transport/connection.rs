@@ -705,7 +705,14 @@ impl Connection {
 
         let query_response = self
             .send_request(&execute_frame, true, prepared_statement.config.tracing)
-            .await?;
+            .await;
+        if query_response.is_err() {
+            warn!(
+                "First query response error: {:?}",
+                query_response.as_ref().err().unwrap()
+            );
+        }
+        let query_response = query_response?;
 
         match &query_response.response {
             Response::Error(frame::response::Error {
@@ -714,10 +721,36 @@ impl Connection {
             }) => {
                 debug!("Connection::execute: Got DbError::Unprepared - repreparing statement with id {:?}", statement_id);
                 // Repreparation of a statement is needed
-                self.reprepare(prepared_statement.get_statement(), prepared_statement)
-                    .await?;
-                self.send_request(&execute_frame, true, prepared_statement.config.tracing)
-                    .await
+                let reprepare_result = self
+                    .reprepare(prepared_statement.get_statement(), prepared_statement)
+                    .await;
+                if reprepare_result.is_err() {
+                    warn!("Error during reprepare: {:?}", reprepare_result);
+                }
+                reprepare_result?;
+                let send_result = self
+                    .send_request(&execute_frame, true, prepared_statement.config.tracing)
+                    .await;
+                if matches!(
+                    send_result,
+                    Err(QueryError::DbError(DbError::Unprepared { .. }, ..))
+                ) {
+                    warn!("Reprepared the statement, but still got the unprepared error!");
+                }
+                let query_response = send_result?;
+                if matches!(
+                    &query_response.response,
+                    Response::Error(frame::response::Error {
+                        error: DbError::Unprepared { .. },
+                        ..
+                    }),
+                ) {
+                    warn!(
+                        "Reprepared the statement, but still got the unprepared error! ID {:?}",
+                        statement_id
+                    );
+                };
+                Ok(query_response)
             }
             _ => Ok(query_response),
         }
