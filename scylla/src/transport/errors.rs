@@ -741,7 +741,11 @@ pub struct BrokenConnectionError(Arc<dyn Error + Sync + Send>);
 
 impl BrokenConnectionError {
     /// Retrieve an error reason.
-    pub fn get_reason(&self) -> &Arc<dyn Error + Sync + Send> {
+    pub fn get_reason_arced(&self) -> &Arc<dyn Error + Sync + Send> {
+        &self.0
+    }
+
+    pub fn get_reason(&self) -> &(dyn Error + Sync + Send) {
         &self.0
     }
 }
