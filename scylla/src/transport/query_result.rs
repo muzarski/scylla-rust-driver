@@ -203,28 +203,23 @@ impl QueryResult {
     /// Transforms itself into the Rows result type to enable deserializing rows.
     /// Deserializes result metadata and allocates it.
     ///
-    /// Returns `None` if the response is not of Rows kind.
+    /// Returns an error if the response is not of Rows kind or metadata deserialization failed.
     ///
     /// ```rust
     /// # use scylla::transport::query_result::{QueryResult, QueryRowsResult};
     /// # fn example(query_result: QueryResult) -> Result<(), Box<dyn std::error::Error>> {
-    /// let maybe_rows_result = query_result.into_rows_result()?;
-    /// if let Some(rows_result) = maybe_rows_result {
-    ///     let mut rows_iter = rows_result.rows::<(i32, &str)>()?;
-    ///     while let Some((num, text)) = rows_iter.next().transpose()? {
-    ///         // do something with `num` and `text``
-    ///     }
-    /// } else {
-    ///     // Response was not Result:Rows, but some other kind of Result.
+    /// let rows_result = query_result.into_rows_result()?;
+    ///
+    /// let mut rows_iter = rows_result.rows::<(i32, &str)>()?;
+    /// while let Some((num, text)) = rows_iter.next().transpose()? {
+    ///     // do something with `num` and `text``
     /// }
     ///
     /// Ok(())
     /// # }
     ///
     /// ```
-    pub fn into_rows_result(
-        self,
-    ) -> Result<Option<QueryRowsResult>, ResultMetadataLazyDeserializationError> {
+    pub fn into_rows_result(self) -> Result<QueryRowsResult, IntoRowsResultError> {
         let QueryResult {
             raw_metadata_and_rows,
             tracing_id,
@@ -239,7 +234,7 @@ impl QueryResult {
                     tracing_id,
                 })
             })
-            .transpose()
+            .unwrap_or(Err(IntoRowsResultError::ResultNotRows))
     }
 
     /// Transforms itself into the legacy result type, by eagerly deserializing rows
@@ -291,14 +286,11 @@ impl QueryResult {
 /// ```rust
 /// # use scylla::transport::query_result::QueryResult;
 /// # fn example(query_result: QueryResult) -> Result<(), Box<dyn std::error::Error>> {
-/// let maybe_rows_result = query_result.into_rows_result()?;
-/// if let Some(rows_result) = maybe_rows_result {
-///     let mut rows_iter = rows_result.rows::<(i32, &str)>()?;
-///     while let Some((num, text)) = rows_iter.next().transpose()? {
-///         // do something with `num` and `text``
-///     }
-/// } else {
-///     // Response was not Result:Rows, but some other kind of Result.
+/// let rows_result = query_result.into_rows_result()?;
+///
+/// let mut rows_iter = rows_result.rows::<(i32, &str)>()?;
+/// while let Some((num, text)) = rows_iter.next().transpose()? {
+///     // do something with `num` and `text``
 /// }
 ///
 /// Ok(())
@@ -417,6 +409,18 @@ impl QueryRowsResult {
             Err(RowsError::TypeCheckFailed(err)) => Err(SingleRowError::TypeCheckFailed(err)),
         }
     }
+}
+
+/// An error returned by [`QueryResult::into_rows_result`]
+#[derive(Debug, Error, Clone)]
+pub enum IntoRowsResultError {
+    /// Result is not of Rows kind
+    #[error("Result is not of Rows kind")]
+    ResultNotRows,
+
+    /// Failed to lazily deserialize result metadata.
+    #[error("Failed to lazily deserialize result metadata: {0}")]
+    ResultMetadataLazyDeserializationError(#[from] ResultMetadataLazyDeserializationError),
 }
 
 /// An error returned by [`QueryRowsResult::rows`].
@@ -566,8 +570,8 @@ mod tests {
             // Not RESULT::Rows response -> no column specs
             {
                 let rqr = QueryResult::new(None, None, Vec::new());
-                let qr = rqr.into_rows_result().unwrap();
-                assert_matches!(qr, None);
+                let qr = rqr.into_rows_result();
+                assert_matches!(qr, Err(IntoRowsResultError::ResultNotRows));
             }
 
             // RESULT::Rows response -> some column specs
@@ -577,7 +581,7 @@ mod tests {
                 let rr = RawMetadataAndRawRows::new_for_test(None, Some(metadata), false, 0, &[])
                     .unwrap();
                 let rqr = QueryResult::new(Some(rr), None, Vec::new());
-                let qr = rqr.into_rows_result().unwrap().unwrap();
+                let qr = rqr.into_rows_result().unwrap();
                 let column_specs = qr.column_specs();
                 assert_eq!(column_specs.len(), n);
 
@@ -624,8 +628,8 @@ mod tests {
             // Not RESULT::Rows
             {
                 let rqr = QueryResult::new(None, None, Vec::new());
-                let qr = rqr.into_rows_result().unwrap();
-                assert_matches!(qr, None);
+                let qr = rqr.into_rows_result();
+                assert_matches!(qr, Err(IntoRowsResultError::ResultNotRows));
             }
 
             // RESULT::Rows with 0 rows
@@ -634,7 +638,7 @@ mod tests {
                 let rqr = QueryResult::new(Some(rr), None, Vec::new());
                 assert_matches!(rqr.result_not_rows(), Err(ResultNotRowsError));
 
-                let qr = rqr.into_rows_result().unwrap().unwrap();
+                let qr = rqr.into_rows_result().unwrap();
 
                 // Type check error
                 {
@@ -680,8 +684,8 @@ mod tests {
                     assert_matches!(rqr.result_not_rows(), Err(ResultNotRowsError));
                 }
 
-                let qr_good_data = rqr_good_data.into_rows_result().unwrap().unwrap();
-                let qr_bad_data = rqr_bad_data.into_rows_result().unwrap().unwrap();
+                let qr_good_data = rqr_good_data.into_rows_result().unwrap();
+                let qr_bad_data = rqr_bad_data.into_rows_result().unwrap();
 
                 for qr in [&qr_good_data, &qr_bad_data] {
                     // Type check error
@@ -737,7 +741,7 @@ mod tests {
                 let rqr = QueryResult::new(Some(rr), None, Vec::new());
                 assert_matches!(rqr.result_not_rows(), Err(ResultNotRowsError));
 
-                let qr = rqr.into_rows_result().unwrap().unwrap();
+                let qr = rqr.into_rows_result().unwrap();
 
                 // Type check error
                 {
