@@ -205,6 +205,8 @@ impl QueryResult {
     ///
     /// Returns an error if the response is not of Rows kind or metadata deserialization failed.
     ///
+    /// See [`QueryResult::into_rows_result_with_recovery`] if you want to recover `self` conversion fails.
+    ///
     /// ```rust
     /// # use scylla::transport::query_result::{QueryResult, QueryRowsResult};
     /// # fn example(query_result: QueryResult) -> Result<(), Box<dyn std::error::Error>> {
@@ -235,6 +237,52 @@ impl QueryResult {
                 })
             })
             .unwrap_or(Err(IntoRowsResultError::ResultNotRows))
+    }
+
+    /// Does the same as [`QueryResult::into_rows_result`] but recovers `self` on error.
+    ///
+    /// ```rust
+    /// # use scylla::transport::query_result::{QueryResult, QueryRowsResult};
+    /// # fn example(query_result: QueryResult) -> Result<(), Box<dyn std::error::Error>> {
+    /// let conversion_result = query_result.into_rows_result_with_recovery();
+    ///
+    /// match conversion_result {
+    ///     Ok(rows_result) => {
+    ///         let mut rows_iter = rows_result.rows::<(i32, &str)>()?;
+    ///         while let Some((num, text)) = rows_iter.next().transpose()? {
+    ///             // do something with `num` and `text``
+    ///         }
+    ///     }
+    ///     Err((query_result, err)) => {
+    ///         // recover original query result and inspect conversion error
+    ///     }
+    /// }
+    ///
+    /// Ok(())
+    /// # }
+    ///
+    /// ```
+    pub fn into_rows_result_with_recovery(
+        self,
+    ) -> Result<QueryRowsResult, (Self, IntoRowsResultError)> {
+        // This clone is very cheap. It results in `Copy` of 3 values, and `Clone` of Bytes and optional Arc.
+        let raw_metadata_and_rows = self.raw_metadata_and_rows.clone();
+
+        if let Some(raw_rows) = raw_metadata_and_rows.clone() {
+            match raw_rows.deserialize_metadata() {
+                Ok(raw_rows_with_metadata) => Ok(QueryRowsResult {
+                    raw_rows_with_metadata,
+                    warnings: self.warnings,
+                    tracing_id: self.tracing_id,
+                }),
+                Err(err) => Err((
+                    self,
+                    IntoRowsResultError::ResultMetadataLazyDeserializationError(err),
+                )),
+            }
+        } else {
+            Err((self, IntoRowsResultError::ResultNotRows))
+        }
     }
 
     /// Transforms itself into the legacy result type, by eagerly deserializing rows
@@ -775,6 +823,44 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn test_recover_query_result() {
+        // Used to trigger ResultMetadataLazyDeserializationError.
+        fn sample_raw_rows_invalid_metadata(cols: usize) -> RawMetadataAndRawRows {
+            // Column count mistmatch - actual = claimed - 1
+            let invalid_metadata = ResultMetadata::new_for_test(
+                cols,
+                column_spec_infinite_iter().take(cols - 1).collect(),
+            );
+
+            RawMetadataAndRawRows::new_for_test(None, Some(invalid_metadata), false, 0, &[])
+                .unwrap()
+        }
+
+        // Check tracing ID
+        for tracing_id in [None, Some(Uuid::from_u128(0x_feed_dead))] {
+            for raw_rows in [None, Some(sample_raw_rows_invalid_metadata(7))] {
+                let qr = QueryResult::new(raw_rows, tracing_id, vec![]);
+
+                let (recovered_qr, _error) = qr.into_rows_result_with_recovery().unwrap_err();
+                assert_eq!(recovered_qr.tracing_id, tracing_id);
+            }
+        }
+
+        // Check warnings
+        for raw_rows in [None, Some(sample_raw_rows_invalid_metadata(7))] {
+            let warnings = &["Ooops", "Meltdown..."];
+            let qr = QueryResult::new(
+                raw_rows,
+                None,
+                warnings.iter().copied().map(String::from).collect(),
+            );
+
+            let (recovered_qr, _error) = qr.into_rows_result_with_recovery().unwrap_err();
+            assert_eq!(recovered_qr.warnings().collect_vec(), warnings);
         }
     }
 }
