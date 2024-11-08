@@ -333,6 +333,30 @@ pub enum RawRowsAndPagingStateResponseParseError {
     PagingStateParseError(LowLevelDeserializationError),
 }
 
+/// An error that occurred during lazy result metadata deserialization.
+#[non_exhaustive]
+#[derive(Debug, Error, Clone)]
+pub enum ResultMetadataLazyDeserializationError {
+    /// Mismatch between column count claimed by the server and the actual column count.
+    #[error("Invalid result metadata, server claims {col_count} columns, received {col_specs_count} col specs.")]
+    ColumnCountMismatch {
+        col_count: usize,
+        col_specs_count: usize,
+    },
+
+    /// Failed to parse global table spec.
+    #[error("Invalid global table spec: {0}")]
+    GlobalTableSpecParseError(#[from] TableSpecParseError),
+
+    /// Failed to parse column spec.
+    #[error("Invalid column spec: {0}")]
+    ColumnSpecParseError(#[from] ColumnSpecParseError),
+
+    /// Received malformed rows count from the server.
+    #[error("Malformed rows count: {0}")]
+    RowsCountParseError(LowLevelDeserializationError),
+}
+
 /// An error type returned when deserialization
 /// of `RESULT::Rows` response fails.
 #[non_exhaustive]
