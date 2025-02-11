@@ -91,7 +91,7 @@ impl NodeOptions {
         format!("node{}", self.id)
     }
 
-    fn from(value: &ClusterOptions) -> Self {
+    fn from_cluster_opts(value: &ClusterOptions) -> Self {
         NodeOptions {
             id: 0,
             datacenter_id: 1,
@@ -522,7 +522,7 @@ impl Cluster {
             NodeOptions {
                 id: self.get_free_node_id().await,
                 datacenter_id: datacenter_id.unwrap_or(1),
-                ..NodeOptions::from(&self.opts)
+                ..NodeOptions::from_cluster_opts(&self.opts)
             },
             self.opts.config.clone(),
             self.logged_cmd.clone(),
