@@ -409,11 +409,11 @@ impl NodeList {
         self.0.push(node);
     }
 
-    fn iter(&self) -> impl Iterator<Item = &Arc<RwLock<Node>>> {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &Arc<RwLock<Node>>> {
         self.0.iter()
     }
 
-    async fn get_by_id(&self, id: u16) -> Option<&Arc<RwLock<Node>>> {
+    pub(crate) async fn get_by_id(&self, id: u16) -> Option<&Arc<RwLock<Node>>> {
         for node in self.iter() {
             if node.read().await.opts.id == id {
                 return Some(node);
