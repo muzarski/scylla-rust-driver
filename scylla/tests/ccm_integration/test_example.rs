@@ -31,13 +31,8 @@ async fn test_cluster_lifecycle1() {
             .expect("failed to get rows")
             .rows::<(String,)>()
             .expect("failed to deserialize rows")
-            .try_fold(Vec::new(), |mut out, rec| match rec {
-                Ok(val) => {
-                    out.push(val.0);
-                    Ok(out)
-                }
-                Err(err) => Err(err),
-            })
+            .map(|res| res.map(|row| row.0))
+            .collect::<Result<Vec<_>, _>>()
             .unwrap();
         println!("{:?}", rows);
     }
@@ -60,13 +55,8 @@ async fn test_cluster_lifecycle2() {
             .expect("failed to get rows")
             .rows::<(String,)>()
             .expect("failed to deserialize rows")
-            .try_fold(Vec::new(), |mut out, rec| match rec {
-                Ok(val) => {
-                    out.push(val.0);
-                    Ok(out)
-                }
-                Err(err) => Err(err),
-            })
+            .map(|res| res.map(|row| row.0))
+            .collect::<Result<Vec<_>, _>>()
             .unwrap();
         println!("{:?}", rows);
     }
