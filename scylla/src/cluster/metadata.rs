@@ -200,12 +200,35 @@ impl Keyspace {
     }
 }
 
+/// Describes a table in the cluster.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Table {
-    pub columns: HashMap<String, Column>,
-    pub partition_key: Vec<String>,
-    pub clustering_key: Vec<String>,
-    pub partitioner: Option<String>,
+    pub(crate) columns: HashMap<String, Column>,
+    pub(crate) partition_key: Vec<String>,
+    pub(crate) clustering_key: Vec<String>,
+    pub(crate) partitioner: Option<String>,
+}
+
+impl Table {
+    /// Returns the columns of this table.
+    pub fn columns(&self) -> &HashMap<String, Column> {
+        &self.columns
+    }
+
+    /// Returns the names of the columns that form the partition key of this table.
+    pub fn partition_key(&self) -> &[String] {
+        &self.partition_key
+    }
+
+    /// Returns the names of the columns that form the clustering key of this table.
+    pub fn clustering_key(&self) -> &[String] {
+        &self.clustering_key
+    }
+
+    /// Returns the name of the partitioner used by this table.
+    pub fn partitioner(&self) -> Option<&str> {
+        self.partitioner.as_ref().map(|x| x.as_str())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

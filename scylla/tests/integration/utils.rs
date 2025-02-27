@@ -108,7 +108,7 @@ pub(crate) async fn supports_feature(session: &Session, feature: &str) -> bool {
         .get("local")
         .unwrap();
 
-    if !system_local.columns.contains_key("supported_features") {
+    if !system_local.columns().contains_key("supported_features") {
         return false;
     }
 
