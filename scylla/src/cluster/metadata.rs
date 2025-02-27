@@ -231,13 +231,17 @@ impl Table {
     }
 }
 
+/// Describes a materialized view in the cluster.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MaterializedView {
     pub view_metadata: Table,
     pub base_table_name: String,
 }
 
+/// Describes a column of the table.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Column {
     pub typ: ColumnType<'static>,
     pub kind: ColumnKind,
@@ -339,6 +343,7 @@ impl PreCollectionType {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ColumnKind {
     Regular,
     Static,
@@ -365,6 +370,7 @@ impl std::str::FromStr for ColumnKind {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 #[allow(clippy::enum_variant_names)]
 pub enum Strategy {
     SimpleStrategy {
