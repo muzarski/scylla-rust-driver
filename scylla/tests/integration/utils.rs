@@ -104,7 +104,7 @@ pub(crate) async fn supports_feature(session: &Session, feature: &str) -> bool {
         .get_keyspace_info()
         .get("system")
         .unwrap()
-        .tables
+        .tables()
         .get("local")
         .unwrap();
 

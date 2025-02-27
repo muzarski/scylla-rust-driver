@@ -166,15 +166,38 @@ impl Peer {
     }
 }
 
+/// Describes a keyspace in the cluster.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Keyspace {
-    pub strategy: Strategy,
+    pub(crate) strategy: Strategy,
     /// Empty HashMap may as well mean that the client disabled schema fetching in SessionConfig
-    pub tables: HashMap<String, Table>,
+    pub(crate) tables: HashMap<String, Table>,
     /// Empty HashMap may as well mean that the client disabled schema fetching in SessionConfig
-    pub views: HashMap<String, MaterializedView>,
+    pub(crate) views: HashMap<String, MaterializedView>,
     /// Empty HashMap may as well mean that the client disabled schema fetching in SessionConfig
-    pub user_defined_types: HashMap<String, Arc<UserDefinedType<'static>>>,
+    pub(crate) user_defined_types: HashMap<String, Arc<UserDefinedType<'static>>>,
+}
+
+impl Keyspace {
+    /// Returns the replication strategy employed by this keyspace.
+    pub fn strategy(&self) -> &Strategy {
+        &self.strategy
+    }
+
+    /// Returns the tables defined in this keyspace.
+    pub fn tables(&self) -> &HashMap<String, Table> {
+        &self.tables
+    }
+
+    /// Returns the materialized views defined in this keyspace.
+    pub fn views(&self) -> &HashMap<String, MaterializedView> {
+        &self.views
+    }
+
+    /// Returns the user-defined types defined in this keyspace.
+    pub fn user_defined_types(&self) -> &HashMap<String, Arc<UserDefinedType<'static>>> {
+        &self.user_defined_types
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
